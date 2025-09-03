@@ -1,87 +1,73 @@
-# main.py
 import os
 import asyncio
-import time
 from typing import Optional
 
 from telegram import (
     Update, Message,
-    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup,
-    ReplyKeyboardRemove
+    InlineKeyboardMarkup, InlineKeyboardButton
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, ContextTypes, CallbackQueryHandler,
-    filters
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ContextTypes, filters
 )
 
 # Redis (async)
 from redis.asyncio import Redis
 
-# ====== ENV ======
+# ========= ENV =========
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
-CHANNEL_ID = os.environ.get("CHANNEL_ID")  # для VIP-проверки подписки
 
-# ====== Redis keys ======
+# ========= Redis helpers / Keys =========
 redis: Optional[Redis] = None
 
-K_Q_GLOBAL = "q:global"                      # общая очередь
-K_Q_GIRLS  = "q:gender:f"
-K_Q_BOYS   = "q:gender:m"
+QUEUE_KEY = "q:global"                 # очередь ожидающих
+PAIR_KEY  = "pair:{uid}"               # ключ пары для юзера
+STAT_MATCH = "stat:matches"
+STAT_MSG   = "stat:messages"
 
-K_PAIR  = "pair:{uid}"                       # текущая пара
-K_USER  = "user:{uid}"                       # профиль пользователя (hash)
 
-K_STAT_MATCH = "stat:matches"
-K_STAT_MSG   = "stat:messages"
-
-# ====== онбординг ======
-AGE_GROUPS = ["12-20", "21-30", "31-40"]
-GENDERS = {"m": "Мужской", "f": "Женский"}
-
-# ====== утилиты Redis ======
 async def get_peer(uid: int) -> Optional[int]:
-    pid = await redis.get(K_PAIR.format(uid=uid))
+    pid = await redis.get(PAIR_KEY.format(uid=uid))
     return int(pid) if pid else None
+
 
 async def set_pair(a: int, b: int):
     pipe = redis.pipeline()
-    pipe.set(K_PAIR.format(uid=a), b, ex=24 * 3600)
-    pipe.set(K_PAIR.format(uid=b), a, ex=24 * 3600)
-    pipe.incr(K_STAT_MATCH)
+    pipe.set(PAIR_KEY.format(uid=a), b, ex=24 * 3600)
+    pipe.set(PAIR_KEY.format(uid=b), a, ex=24 * 3600)
+    pipe.incr(STAT_MATCH)
     await pipe.execute()
+
 
 async def clear_pair(uid: int):
     peer = await get_peer(uid)
     pipe = redis.pipeline()
-    pipe.delete(K_PAIR.format(uid=uid))
+    pipe.delete(PAIR_KEY.format(uid=uid))
     if peer:
-        pipe.delete(K_PAIR.format(uid=peer))
+        pipe.delete(PAIR_KEY.format(uid=peer))
     await pipe.execute()
     return peer
 
-async def in_any_queue_remove(uid: int):
-    # удаляем из всех очередей возможные дубликаты
-    try:
-        await redis.lrem(K_Q_GLOBAL, 0, str(uid))
-        await redis.lrem(K_Q_GIRLS, 0, str(uid))
-        await redis.lrem(K_Q_BOYS, 0, str(uid))
-    except Exception:
-        pass
 
-async def enqueue(uid: int, queue_key: str):
-    # не добавляем, если уже в паре
+async def enqueue(uid: int):
+    # если уже в паре — не ставим
     if await get_peer(uid):
         return False
-    await in_any_queue_remove(uid)
-    await redis.rpush(queue_key, uid)
+    # удалим возможные дубли
+    try:
+        await redis.lrem(QUEUE_KEY, 0, str(uid))
+    except Exception:
+        pass
+    await redis.rpush(QUEUE_KEY, uid)
     return True
 
-async def try_match_from(queue_key: str, uid: int) -> Optional[int]:
-    # пробуем взять того, кто уже ожидает
+
+async def try_match(uid: int) -> Optional[int]:
+    # ищем другого человека из очереди
     while True:
-        other = await redis.lpop(queue_key)
+        other = await redis.lpop(QUEUE_KEY)
         if other is None:
             return None
         other = int(other)
@@ -91,305 +77,158 @@ async def try_match_from(queue_key: str, uid: int) -> Optional[int]:
             await set_pair(uid, other)
             return other
 
-# профиль и VIP
-async def get_profile(uid: int) -> dict:
-    data = await redis.hgetall(K_USER.format(uid=uid))
-    # redis возвращает всё как str
-    return data or {}
 
-async def set_profile(uid: int, **fields):
-    key = K_USER.format(uid=uid)
-    await redis.hset(key, mapping={k: str(v) for k, v in fields.items()})
-
-async def is_vip(uid: int) -> bool:
-    prof = await get_profile(uid)
-    until = float(prof.get("vip_until", "0"))
-    return until > time.time()
-
-async def grant_vip_hours(uid: int, hours: float):
-    until = time.time() + hours * 3600
-    await set_profile(uid, vip_until=until)
-
-# ====== тексты/кнопки ======
+# ========= UI =========
 WELCOME_CARD = (
-    "<b>Анонимный чат</b>\n"
+    "<b>Анонимный чат в Telegram</b>\n"
     "Общайся анонимно со случайными собеседниками.\n\n"
-    "Пожалуйста, укажи свой пол и возраст — это поможет улучшить подбор."
+    "🔍 Нажми <code>/find</code> чтобы начать поиск.\n"
+    "➡️ <code>/next</code> — новый собеседник\n"
+    "⛔ <code>/stop</code> — закончить диалог\n"
 )
 
-def kb_gender():
-    return InlineKeyboardMarkup([
+async def send_start_card(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔍 Начать поиск", callback_data="find")],
         [
-            InlineKeyboardButton("👩 Женский", callback_data="gender:f"),
-            InlineKeyboardButton("👨 Мужской", callback_data="gender:m"),
-        ]
-    ])
-
-def kb_age():
-    rows = []
-    row = []
-    for i, g in enumerate(AGE_GROUPS, start=1):
-        row.append(InlineKeyboardButton(g, callback_data=f"age:{g}"))
-        if i % 3 == 0:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    return InlineKeyboardMarkup(rows)
-
-def kb_main_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚀 Поиск любого собеседника", callback_data="menu:find_any")],
-        [
-            InlineKeyboardButton("👩 Поиск Ж", callback_data="menu:find_f"),
-            InlineKeyboardButton("👨 Поиск М", callback_data="menu:find_m"),
+            InlineKeyboardButton("➡️ Следующий", callback_data="next"),
+            InlineKeyboardButton("⛔ Стоп", callback_data="stop"),
         ],
     ])
-
-def kb_vip():
-    buttons = [
-        [InlineKeyboardButton("✅ Проверить подписку на канал (3 ч VIP)", callback_data="vip:check_sub")],
-        [
-            InlineKeyboardButton("💳 0,99$ / 1 мес.", callback_data="vip:buy_1"),
-            InlineKeyboardButton("💳 4,99$ / 7 мес.", callback_data="vip:buy_7"),
-            InlineKeyboardButton("💳 7,99$ / 3 мес.", callback_data="vip:buy_3"),
-        ],
-    ]
-    # если указан канал — добавим URL для удобства
-    if CHANNEL_ID and isinstance(CHANNEL_ID, str) and CHANNEL_ID.startswith("@"):
-        buttons.insert(0, [InlineKeyboardButton("🔔 Перейти в канал", url=f"https://t.me/{CHANNEL_ID.lstrip('@')}")])
-    return InlineKeyboardMarkup(buttons)
-
-# ====== HELPER: показать главное меню или продолжить онбординг ======
-async def ensure_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    prof = await get_profile(uid)
-    gender = prof.get("gender")
-    age = prof.get("age")
-
-    if not gender:
-        await update.effective_chat.send_message(
-            WELCOME_CARD, parse_mode=ParseMode.HTML, reply_markup=kb_gender()
-        )
-        return False
-    if not age:
-        await update.effective_chat.send_message("Выбери возраст:", reply_markup=kb_age())
-        return False
-
     await update.effective_chat.send_message(
-        "Готово! Выбери режим поиска:", reply_markup=kb_main_menu()
+        WELCOME_CARD, parse_mode=ParseMode.HTML, reply_markup=kb
     )
-    return True
 
-# ====== HANDLERS ======
+
+# ========= Handlers =========
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await ensure_profile(update, ctx)
+    await send_start_card(update, ctx)
 
-async def cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+
+async def cb_query(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if not q:
         return
-    uid = q.from_user.id
     await q.answer()
+    if q.data == "find":
+        await find_cmd(update, ctx, by_button=True)
+    elif q.data == "next":
+        await next_cmd(update, ctx)
+    elif q.data == "stop":
+        await stop_cmd(update, ctx)
 
-    data = q.data or ""
 
-    # Онбординг: пол
-    if data.startswith("gender:"):
-        g = data.split(":", 1)[1]
-        if g not in ("m", "f"):
-            return
-        await set_profile(uid, gender=g)
-        await q.edit_message_text(f"Пол: {GENDERS[g]}")
-        await q.message.chat.send_message("Теперь выбери возраст:", reply_markup=kb_age())
-        return
+async def find_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE, by_button: bool = False):
+    uid = update.effective_user.id
 
-    # Онбординг: возраст
-    if data.startswith("age:"):
-        a = data.split(":", 1)[1]
-        if a not in AGE_GROUPS:
-            return
-        await set_profile(uid, age=a)
-        await q.edit_message_text(f"Возраст: {a}")
-        await q.message.chat.send_message("Отлично! Выбери режим поиска:", reply_markup=kb_main_menu())
-        return
-
-    # Главное меню
-    if data == "menu:find_any":
-        await find_any(update, ctx)
-        return
-
-    if data in ("menu:find_f", "menu:find_m"):
-        # Поиск по полу только для VIP
-        if not await is_vip(uid):
-            await q.message.chat.send_message(
-                "Поиск по полу доступен только VIP-пользователям.\n"
-                "• Подпишись на канал и получи VIP на 3 часа\n"
-                "• Или оформи платную подписку",
-                reply_markup=kb_vip()
-            )
-            return
-        # VIP есть → ставим в соответствующую очередь
-        target = "f" if data.endswith("_f") else "m"
-        await find_by_gender(update, ctx, target)
-        return
-
-    # VIP: проверка подписки
-    if data == "vip:check_sub":
-        if not CHANNEL_ID:
-            await q.message.chat.send_message("Канал для проверки не настроен (CHANNEL_ID). Обратись к админу.")
-            return
-        try:
-            member = await ctx.bot.get_chat_member(CHANNEL_ID, uid)
-            if member.status in ("member", "administrator", "creator"):
-                await grant_vip_hours(uid, 3)
-                await q.message.chat.send_message("✅ Подписка найдена. VIP активирован на 3 часа!")
-                await q.message.chat.send_message("Вернуться к меню:", reply_markup=kb_main_menu())
-            else:
-                await q.message.chat.send_message("❌ Я не вижу подписку на канал.")
-        except Exception:
-            await q.message.chat.send_message("Не удалось проверить подписку. Убедись, что канал публичный и бот — админ.")
-        return
-
-    # VIP: опции оплаты — здесь заглушки
-    if data.startswith("vip:buy_"):
-        plan = data.split("_", 1)[1]
-        await q.message.chat.send_message(
-            "Оплата пока не подключена.\n"
-            "Могу активировать временный VIP (демо) на 3 часа.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Активировать демо VIP 3 часа", callback_data="vip:demo")]
-            ])
+    # уже в диалоге?
+    peer = await get_peer(uid)
+    if peer:
+        await update.effective_chat.send_message(
+            "Ты уже в диалоге. Напиши /next для нового собеседника или /stop чтобы завершить."
         )
         return
 
-    if data == "vip:demo":
-        await grant_vip_hours(uid, 3)
-        await q.message.chat.send_message("🎁 Демо-VIP активирован на 3 часа.")
-        await q.message.chat.send_message("Вернуться к меню:", reply_markup=kb_main_menu())
-        return
+    await enqueue(uid)
+    await update.effective_chat.send_message("🔍 Ищу собеседника…")
 
-# Команды (опционально — дублируют меню)
-async def find_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await find_any(update, ctx)
+    # пробуем моментально сматчить
+    peer = await try_match(uid)
+    if peer:
+        await update.effective_chat.send_message("✅ Собеседник найден. Можешь писать!")
+        await ctx.bot.send_message(peer, "✅ Собеседник найден. Можешь писать!")
+
 
 async def next_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+
+    # освобождаем текущего собеседника, если есть
     old_peer = await clear_pair(uid)
     if old_peer:
-        await ctx.bot.send_message(old_peer, "🔁 Собеседник вышел. Ищу нового…")
-        await enqueue(old_peer, K_Q_GLOBAL)
-        # пробуем сматчить освободившегося
-        new_peer_for_old = await try_match_from(K_Q_GLOBAL, old_peer)
-        if new_peer_for_old:
+        await ctx.bot.send_message(old_peer, "🔁 Собеседник вышел. Ищу тебе нового…")
+        await enqueue(old_peer)
+        new_for_old = await try_match(old_peer)
+        if new_for_old:
             await ctx.bot.send_message(old_peer, "✅ Новый собеседник найден. Пиши!")
-            await ctx.bot.send_message(new_peer_for_old, "✅ Собеседник найден. Пиши!")
+            await ctx.bot.send_message(new_for_old, "✅ Собеседник найден. Пиши!")
 
-    await enqueue(uid, K_Q_GLOBAL)
+    # ищем нового для текущего пользователя
+    await enqueue(uid)
     await update.effective_chat.send_message("🔁 Ищу нового собеседника…")
-    new_peer = await try_match_from(K_Q_GLOBAL, uid)
+    new_peer = await try_match(uid)
     if new_peer:
         await update.effective_chat.send_message("✅ Новый собеседник найден. Пиши!")
         await ctx.bot.send_message(new_peer, "✅ Собеседник найден. Пиши!")
 
+
 async def stop_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     peer = await clear_pair(uid)
-    await update.effective_chat.send_message("⛔ Диалог завершён. Нажми /find, чтобы искать заново.", reply_markup=kb_main_menu())
+    await update.effective_chat.send_message(
+        "⛔ Диалог завершён. Нажми /find, чтобы искать заново."
+    )
     if peer:
-        await ctx.bot.send_message(peer, "⛔ Собеседник завершил диалог. Нажми /find, чтобы искать заново.")
+        await ctx.bot.send_message(
+            peer, "⛔ Собеседник завершил диалог. Нажми /find, чтобы искать заново."
+        )
+
+
+async def relay(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Пересылка всех типов сообщений анонимно собеседнику."""
+    uid = update.effective_user.id
+    peer = await get_peer(uid)
+    if not peer:
+        return
+
+    msg: Message = update.effective_message
+    await redis.incr(STAT_MSG)
+
+    if msg.text:
+        await ctx.bot.send_message(peer, msg.text)
+    elif msg.photo:
+        await ctx.bot.send_photo(peer, msg.photo[-1].file_id, caption=msg.caption or None)
+    elif msg.video:
+        await ctx.bot.send_video(peer, msg.video.file_id, caption=msg.caption or None)
+    elif msg.voice:
+        await ctx.bot.send_voice(peer, msg.voice.file_id, caption=msg.caption or None)
+    elif msg.audio:
+        await ctx.bot.send_audio(peer, msg.audio.file_id, caption=msg.caption or None)
+    elif msg.document:
+        await ctx.bot.send_document(peer, msg.document.file_id, caption=msg.caption or None)
+    elif msg.sticker:
+        await ctx.bot.send_sticker(peer, msg.sticker.file_id)
+    elif msg.animation:
+        await ctx.bot.send_animation(peer, msg.animation.file_id, caption=msg.caption or None)
+    elif msg.video_note:
+        await ctx.bot.send_video_note(peer, msg.video_note.file_id)
+    elif msg.location:
+        await ctx.bot.send_location(peer, msg.location.latitude, msg.location.longitude)
+    elif msg.contact:
+        await update.effective_chat.send_message(
+            "⚠️ Отправка контактов отключена ради анонимности."
+        )
+    else:
+        await update.effective_chat.send_message("Тип сообщения пока не поддержан.")
+
 
 async def rules(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (
         "📜 Правила:\n"
         "— Не раскрывай персональные данные\n"
         "— Запрещён спам, оскорбления и нелегальный контент\n"
-        "— /next — новый собеседник, /stop — завершить диалог"
+        "— Для нового собеседника: /next, чтобы завершить: /stop"
     )
     await update.effective_chat.send_message(text)
 
+
 async def stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    m = await redis.get(K_STAT_MATCH)
-    s = await redis.get(K_STAT_MSG)
+    m, s = await redis.get(STAT_MATCH), await redis.get(STAT_MSG)
     await update.effective_chat.send_message(
         f"📈 Матчей: {int(m or 0)}\n✉️ Сообщений: {int(s or 0)}"
     )
 
-# Реальный поиск
-async def find_any(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    prof = await get_profile(uid)
-    if not (prof.get("gender") and prof.get("age")):
-        await ensure_profile(update, ctx)
-        return
 
-    if await get_peer(uid):
-        await update.effective_chat.send_message("Ты уже в диалоге. /next — новый, /stop — завершить.")
-        return
-
-    await enqueue(uid, K_Q_GLOBAL)
-    await update.effective_chat.send_message("🔍 Ищу собеседника…")
-    peer = await try_match_from(K_Q_GLOBAL, uid)
-    if peer:
-        await update.effective_chat.send_message("✅ Собеседник найден. Пиши!")
-        await ctx.bot.send_message(peer, "✅ Собеседник найден. Пиши!")
-
-async def find_by_gender(update: Update, ctx: ContextTypes.DEFAULT_TYPE, target_gender: str):
-    uid = update.effective_user.id
-    my_prof = await get_profile(uid)
-    if not (my_prof.get("gender") and my_prof.get("age")):
-        await ensure_profile(update, ctx)
-        return
-
-    if await get_peer(uid):
-        await update.effective_chat.send_message("Ты уже в диалоге. /next — новый, /stop — завершить.")
-        return
-
-    queue_key = K_Q_GIRLS if target_gender == "f" else K_Q_BOYS
-    await enqueue(uid, queue_key)
-    await update.effective_chat.send_message(
-        f"🔍 Ищу собеседника по полу: { 'Ж' if target_gender=='f' else 'М' }…"
-    )
-
-    # мгновенный матч из нужной очереди
-    peer = await try_match_from(queue_key, uid)
-    if peer:
-        await update.effective_chat.send_message("✅ Собеседник найден. Пиши!")
-        await ctx.bot.send_message(peer, "✅ Собеседник найден. Пиши!")
-
-# Пересылка сообщений
-async def relay(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    peer = await get_peer(uid)
-    if not peer:
-        return
-    msg: Message = update.effective_message
-    await redis.incr(K_STAT_MSG)
-
-    if msg.text:
-        await ctx.bot.send_message(peer, msg.text)
-    elif msg.photo:
-        await ctx.bot.send_photo(peer, photo=msg.photo[-1].file_id, caption=msg.caption or None)
-    elif msg.video:
-        await ctx.bot.send_video(peer, video=msg.video.file_id, caption=msg.caption or None)
-    elif msg.voice:
-        await ctx.bot.send_voice(peer, voice=msg.voice.file_id, caption=msg.caption or None)
-    elif msg.audio:
-        await ctx.bot.send_audio(peer, audio=msg.audio.file_id, caption=msg.caption or None)
-    elif msg.document:
-        await ctx.bot.send_document(peer, document=msg.document.file_id, caption=msg.caption or None)
-    elif msg.sticker:
-        await ctx.bot.send_sticker(peer, msg.sticker.file_id)
-    elif msg.animation:
-        await ctx.bot.send_animation(peer, animation=msg.animation.file_id, caption=msg.caption or None)
-    elif msg.video_note:
-        await ctx.bot.send_video_note(peer, video_note=msg.video_note.file_id)
-    elif msg.location:
-        await ctx.bot.send_location(peer, latitude=msg.location.latitude, longitude=msg.location.longitude)
-    else:
-        await update.effective_chat.send_message("Этот тип сообщения пока не поддержан.")
-
-# ====== MAIN ======
+# ========= Main =========
 async def main():
     if not TOKEN:
         raise SystemExit("Нет TELEGRAM_TOKEN в переменных окружения!")
@@ -407,12 +246,14 @@ async def main():
     app.add_handler(CommandHandler("stats", stats))
 
     # Кнопки
-    app.add_handler(CallbackQueryHandler(cb))
+    app.add_handler(CallbackQueryHandler(cb_query))
 
     # Пересылка любых пользовательских сообщений
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, reley))
-        # Запуск (PTB v20)
-    await app.run_polling()
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay))
+
+    # Запуск (PTB v20)
+    await app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
