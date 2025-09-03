@@ -405,6 +405,8 @@ def main():
     app.add_handler(CommandHandler("stop", stop_cmd))
     app.add_handler(CommandHandler("rules", rules))
     app.add_handler(CommandHandler("stats", stats))
+    # Обработка VIP-кнопок
+app.add_handler(CallbackQueryHandler(vip_cb, pattern="^vip:"))
 # Обработка выбора пола и возраста
 app.add_handler(MessageHandler(filters.Regex(r"^👨 Мужской$") | filters.Regex(r"^👩 Женский$"), gender_choice))
 app.add_handler(MessageHandler(filters.Regex(r"^(18-24|25-34|35-44|45\+)$"), age_choice))
