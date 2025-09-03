@@ -411,7 +411,8 @@ async def main():
 
     # Пересылка любых пользовательских сообщений
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, # Запуск (PTB v20)
-    await app.run_polling(allowed_updates=Update.ALL_TYPES)
+        # Запуск (PTB v20)
+    await app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())  
+    asyncio.run(main())
