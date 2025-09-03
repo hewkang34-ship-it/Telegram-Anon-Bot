@@ -60,34 +60,34 @@ async def set_pair(a: int, b: int):
 # ====== ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ ======
 from telegram import ReplyKeyboardMarkup, KeyboardButton
 
-# Старт: выбор пола
+# Старт: спрашиваем пол/возраст, либо показываем меню
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [KeyboardButton("👨 Мужской"), KeyboardButton("👩 Женский")]
-    ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-    await update.message.reply_text(
-        "Добро пожаловать! 🚀\n\nВыбери свой пол:",
-        reply_markup=reply_markup
-    )
-    return
-
-# Обработка выбора пола
-async def gender_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    gender = update.message.text
-    if gender not in ["👨 Мужской", "👩 Женский"]:
-        await update.message.reply_text("Пожалуйста, выбери пол кнопками ⬇️")
+    profile = await load_profile(uid)
+
+    # если профиль ещё не заполнен — начинаем с выбора пола
+    if not is_profile_complete(profile):
+        keyboard = [[KeyboardButton("👨 Мужской"), KeyboardButton("👩 Женский")]]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await update.message.reply_text(
+            "Добро пожаловать! 🚀\n\nВыбери свой пол:",
+            reply_markup=reply_markup
+        )
         return
 
-    profile = await load_profile(uid)
-    profile["gender"] = "M" if "Мужской" in gender else "F"
-    await save_profile(uid, profile)
+    # если пол/возраст уже есть — сразу показываем главное меню
+    await show_main_menu(update, context)
 
-    # После выбора пола спрашиваем возраст
+
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        ["18-24", "25-34"],
-        ["35-44", "45+"]
+        ["🚀 Поиск любого собеседника"],
+        ["🙋‍♀️ Поиск Ж", "🙋‍♂️ Поиск М"],
+        ["👑 VIP", "⚙️ Профиль"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    target = update.message or update.effective_chat
+    await target.reply_text("Выбери действие:", reply_markup=reply_markup)
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     await update.message.reply_text(
