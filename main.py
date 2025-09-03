@@ -33,46 +33,86 @@ QUEUE_KEY = "q:global"                 # очередь ожидающих
 PAIR_KEY  = "pair:{uid}"               # ключ пары для юзера
 STAT_MATCH = "stat:matches"
 STAT_MSG   = "stat:messages"
-PROFILE_KEY = "profile:{uid}"          # JSON: {"gender":"M/F", "age_group":"18-24/25-34/35-44/45+", "vip_until": 0}
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await update.effective_chat.send_photo(photo=InputFile(BANNER_PATH))
-    except Exception:
-        await update.effective_chat.send_message("Баннер не найден")
+    uid = update.effective_user.id
+    p = await get_profile(uid)
 
-    await update.effective_chat.send_message("Выбери свой пол:")
-# ===== Helpers для получения ID чата/канала =====
-async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    text = f"Тип: {chat.type}\nID: {chat.id}"
-    if getattr(chat, "username", None):
-        text += f"\n@{chat.username}"
-    await update.effective_message.reply_text(text)
+    if not p["gender"]:
+        await update.message.reply_text(
+            "Привет! Выбери свой пол:",
+            reply_markup=gender_kb()
+        )
+        return
 
-async def on_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    logging.info("CHANNEL_POST -> id=%s title=%s", chat.id, getattr(chat, "title", None))
+    if not p["age_range"]:
+        await update.message.reply_text(
+            "Укажи возраст:",
+            reply_markup=age_kb()
+        )
+        return
 
-async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    logging.info("MY_CHAT_MEMBER -> id=%s title=%s", chat.id, getattr(chat, "title", None))
+    await update.message.reply_text(
+        "Профиль уже заполнен ✅\n" + pretty_profile(p)
+    )
 
-# ===== Профили =====
-async def load_profile(uid: int) -> dict:
+def gender_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("М 🙋🏻‍♂️", callback_data="gender:M"),
+            InlineKeyboardButton("Ж 🙋🏻‍♀️", callback_data="gender:F"),
+        ]
+    ])
+
+def age_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("12–20", callback_data="age:12-20"),
+            InlineKeyboardButton("21–30", callback_data="age:21-30"),
+            InlineKeyboardButton("31–40", callback_data="age:31-40"),
+        ]
+    ])
+
+async def get_profile(uid: int) -> dict:
     raw = await redis.get(PROFILE_KEY.format(uid=uid))
     if not raw:
-        return {}
+        return {"gender": None, "age_range": None}
     try:
         return json.loads(raw)
     except Exception:
-        return {}
+        return {"gender": None, "age_range": None}
 
 async def save_profile(uid: int, data: dict):
-    await redis.set(PROFILE_KEY.format(uid=uid), json.dumps(data), ex=30*24*3600)
+    await redis.set(PROFILE_KEY.format(uid=uid), json.dumps(data))
 
-def is_profile_complete(p: dict) -> bool:
-    return bool(p.get("gender") and p.get("age_group"))
+def pretty_profile(p: dict) -> str:
+    g_map = {"M": "Мужской", "F": "Женский"}
+    g = g_map.get(p.get("gender"), "—")
+    a = p.get("age_range") or "—"
+    return f"Пол: {g}\nВозраст: {a}"
 
+async def on_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    _, gender = query.data.split(":", 1)
+    profile = await get_profile(uid)
+    profile["gender"] = gender
+    await save_profile(uid, profile)
+    await query.edit_message_text(
+        text="Пол сохранён ✅\nТеперь выбери возраст:",
+        reply_markup=age_kb()
+    )
+
+async def on_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    _, age_range = query.data.split(":", 1)
+    profile = await get_profile(uid)
+    profile["age_range"] = age_range
+    await save_profile(uid, profile)
+    text = "Возраст сохранён ✅\n\nТвой профиль:\n" + pretty_profile(profile)
+    await query.edit_message_text(text=text)
 async def get_peer(uid: int) -> Optional[int]:
     pid = await redis.get(PAIR_KEY.format(uid=uid))
     return int(pid) if pid else None
