@@ -57,6 +57,61 @@ async def set_pair(a: int, b: int):
     pipe.set(PAIR_KEY.format(uid=b), a, ex=24 * 3600)
     pipe.incr(STAT_MATCH)
     await pipe.execute()
+# ====== ПРОФИЛЬ ПОЛЬЗОВАТЕЛЯ ======
+from telegram import ReplyKeyboardMarkup, KeyboardButton
+
+# Старт: выбор пола
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [KeyboardButton("👨 Мужской"), KeyboardButton("👩 Женский")]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    await update.message.reply_text(
+        "Добро пожаловать! 🚀\n\nВыбери свой пол:",
+        reply_markup=reply_markup
+    )
+    return
+
+# Обработка выбора пола
+async def gender_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    gender = update.message.text
+    if gender not in ["👨 Мужской", "👩 Женский"]:
+        await update.message.reply_text("Пожалуйста, выбери пол кнопками ⬇️")
+        return
+
+    profile = await load_profile(uid)
+    profile["gender"] = "M" if "Мужской" in gender else "F"
+    await save_profile(uid, profile)
+
+    # После выбора пола спрашиваем возраст
+    keyboard = [
+        ["18-24", "25-34"],
+        ["35-44", "45+"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    await update.message.reply_text(
+        "Отлично! Теперь выбери возрастную категорию:",
+        reply_markup=reply_markup
+    )
+
+# Обработка выбора возраста
+async def age_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    age_group = update.message.text
+
+    if age_group not in ["18-24", "25-34", "35-44", "45+"]:
+        await update.message.reply_text("Пожалуйста, выбери возраст кнопками ⬇️")
+        return
+
+    profile = await load_profile(uid)
+    profile["age_group"] = age_group
+    await save_profile(uid, profile)
+
+    await update.message.reply_text(
+        "✅ Профиль сохранён! Теперь ты можешь начать поиск собеседника.\n\n"
+        "Используй /find чтобы найти чат, /stop чтобы завершить."
+    )
 
 
 async def clear_pair(uid: int):
