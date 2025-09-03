@@ -399,10 +399,10 @@ async def stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ====== MAIN ======
+# ===== MAIN =====
 def main():
     if not TOKEN:
-        raise SystemExit("Нет TELEGRAM_TOKEN в переменных окружения!")
+        raise SystemExit("Нет TELEGRAM_TOKEN в переменных окружения")
 
     global redis
     redis = Redis.from_url(REDIS_URL, decode_responses=True)
@@ -416,20 +416,31 @@ def main():
     app.add_handler(CommandHandler("stop", stop_cmd))
     app.add_handler(CommandHandler("rules", rules))
     app.add_handler(CommandHandler("stats", stats))
-        # Обработка VIP-кнопок
+
+    # Обработка VIP-кнопок
     app.add_handler(CallbackQueryHandler(vip_cb, pattern="^vip:"))
 
     # Обработка выбора пола и возраста
     app.add_handler(MessageHandler(filters.Regex(r"^🙋‍♂️ Мужчина$"), gender_male))
-    app.add_handler(MessageHandler(filters.Regex(r"^(18–24|25–34|35–44|45\+)$"), age_choice))
+    app.add_handler(MessageHandler(
+        filters.Regex(r"^(18–24|25–34|35–44|45\+)$"),  # en dash и плюс экранирован
+        age_choice
+    ))
 
-    # Кнопки
+    # Кнопки (общий callback)
     app.add_handler(CallbackQueryHandler(cb_query))
 
     # Пересылка любых пользовательских сообщений
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))
-# Запуск — БЕЗ await и БЕЗ asyncio.run
-app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    # ===== Наши хендлеры для получения ID =====
+    app.add_handler(CommandHandler("myid", myid))
+    app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, on_channel_post))
+    app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+
+    # Запуск — БЕЗ await и БЕЗ asyncio.run
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     main()
