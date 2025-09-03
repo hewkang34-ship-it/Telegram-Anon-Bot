@@ -441,8 +441,6 @@ app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_M
 
 # Запуск — БЕЗ await и БЕЗ asyncio.run
 app.run_polling(allowed_updates=Update.ALL_TYPES)
-    # Запуск — БЕЗ await и БЕЗ asyncio.run
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
