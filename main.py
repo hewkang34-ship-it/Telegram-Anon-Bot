@@ -228,10 +228,11 @@ async def stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ========= Main =========
-async def main():
+# ====== MAIN ======
+def main():
     if not TOKEN:
         raise SystemExit("Нет TELEGRAM_TOKEN в переменных окружения!")
+
     global redis
     redis = Redis.from_url(REDIS_URL, decode_responses=True)
 
@@ -251,9 +252,8 @@ async def main():
     # Пересылка любых пользовательских сообщений
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay))
 
-    # Запуск (PTB v20)
-    await app.run_polling(allowed_updates=Update.ALL_TYPES)
-
+    # Запуск — БЕЗ await и БЕЗ asyncio.run
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
