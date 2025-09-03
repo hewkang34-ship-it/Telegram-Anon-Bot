@@ -28,7 +28,24 @@ PAIR_KEY  = "pair:{uid}"               # ключ пары для юзера
 STAT_MATCH = "stat:matches"
 STAT_MSG   = "stat:messages"
 
+# ----- Профили пользователей -----
+import json
+PROFILE_KEY = "profile:{uid}"   # JSON: {"gender":"M/F", "age_group":"12-20/21-30/31-40", "vip_until": 0}
 
+async def load_profile(uid: int) -> dict:
+    raw = await redis.get(PROFILE_KEY.format(uid=uid))
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+async def save_profile(uid: int, data: dict):
+    await redis.set(PROFILE_KEY.format(uid=uid), json.dumps(data), ex=30*24*3600)
+
+def is_profile_complete(p: dict) -> bool:
+    return bool(p.get("gender") and p.get("age_group"))
 async def get_peer(uid: int) -> Optional[int]:
     pid = await redis.get(PAIR_KEY.format(uid=uid))
     return int(pid) if pid else None
