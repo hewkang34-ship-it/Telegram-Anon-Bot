@@ -318,6 +318,9 @@ def main():
     app.add_handler(CommandHandler("stop", stop_cmd))
     app.add_handler(CommandHandler("rules", rules))
     app.add_handler(CommandHandler("stats", stats))
+# Обработка выбора пола и возраста
+app.add_handler(MessageHandler(filters.Regex("^(👨 Мужской|👩 Женский)$"), gender_choice))
+app.add_handler(MessageHandler(filters.Regex("^(18-24|25-34|35-44|45\+)$"), age_choice))
 
     # Кнопки
     app.add_handler(CallbackQueryHandler(cb_query))
