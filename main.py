@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from typing import Dict, Optional
+from typing import Optional
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -9,53 +9,20 @@ from telegram.ext import (
     ContextTypes, filters
 )
 
+import redis.asyncio as redis
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("anonchat")
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
+REDIS_URL = os.environ.get("REDIS_URL")  # например: redis://default:<pass>@<host>:<port>/0
 
-# ===== In-memory store (без внешних зависимостей) =====
-class MemStore:
-    def __init__(self):
-        self.profiles: Dict[int, dict] = {}     # uid -> {"gender": "M/F", "age_range": "..."}
-        self.pairs: Dict[int, int] = {}         # uid -> peer_uid
-        self.queue: list[int] = []              # простая очередь
+# ===== Redis клиент =====
+r: Optional[redis.Redis] = None
 
-    async def get_profile(self, uid: int) -> dict:
-        return self.profiles.get(uid, {"gender": None, "age_range": None})
-
-    async def save_profile(self, uid: int, data: dict):
-        self.profiles[uid] = data
-
-    async def reset_profile(self, uid: int):
-        self.profiles.pop(uid, None)
-
-    async def get_peer(self, uid: int) -> Optional[int]:
-        return self.pairs.get(uid)
-
-    async def set_pair(self, a: int, b: int):
-        self.pairs[a] = b
-        self.pairs[b] = a
-
-    async def clear_pair(self, uid: int):
-        peer = self.pairs.pop(uid, None)
-        if peer is not None:
-            self.pairs.pop(peer, None)
-
-    async def push_queue(self, uid: int):
-        if uid not in self.queue:
-            self.queue.append(uid)
-
-    async def pop_queue(self) -> Optional[int]:
-        if self.queue:
-            return self.queue.pop(0)
-        return None
-
-    async def remove_from_queue(self, uid: int):
-        if uid in self.queue:
-            self.queue.remove(uid)
-
-store = MemStore()
+PROFILE_KEY = "profile:{uid}"   # JSON
+PAIR_KEY    = "pair:{uid}"      # int
+QUEUE_KEY   = "q:global"        # list
 
 # ===== UI =====
 def gender_kb() -> InlineKeyboardMarkup:
@@ -86,10 +53,59 @@ def menu_text(prefix: str = "") -> str:
         "/stop — остановить диалог"
     )
 
-# ===== анкета =====
+# ===== Профили =====
+async def get_profile(uid: int) -> dict:
+    raw = await r.get(PROFILE_KEY.format(uid=uid))
+    if not raw:
+        return {"gender": None, "age_range": None}
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {"gender": None, "age_range": None}
+
+async def save_profile(uid: int, data: dict):
+    await r.set(PROFILE_KEY.format(uid=uid), json.dumps(data))
+
+async def reset_profile(uid: int):
+    await r.delete(PROFILE_KEY.format(uid=uid))
+
+# ===== Пары =====
+async def get_peer(uid: int) -> Optional[int]:
+    val = await r.get(PAIR_KEY.format(uid=uid))
+    return int(val) if val else None
+
+async def set_pair(a: int, b: int):
+    pipe = r.pipeline()
+    pipe.set(PAIR_KEY.format(uid=a), b)
+    pipe.set(PAIR_KEY.format(uid=b), a)
+    await pipe.execute()
+
+async def clear_pair(uid: int):
+    peer = await get_peer(uid)
+    pipe = r.pipeline()
+    pipe.delete(PAIR_KEY.format(uid=uid))
+    if peer:
+        pipe.delete(PAIR_KEY.format(uid=peer))
+    await pipe.execute()
+
+# ===== Очередь =====
+async def push_queue(uid: int):
+    # не добавляем дубликаты
+    members = await r.lrange(QUEUE_KEY, 0, -1)
+    if str(uid) not in members:
+        await r.rpush(QUEUE_KEY, uid)
+
+async def pop_queue() -> Optional[int]:
+    val = await r.lpop(QUEUE_KEY)
+    return int(val) if val else None
+
+async def remove_from_queue(uid: int):
+    await r.lrem(QUEUE_KEY, 0, uid)
+
+# ===== Анкета =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    p = await store.get_profile(uid)
+    p = await get_profile(uid)
     if not p["gender"]:
         await update.message.reply_text("Привет! Выбери свой пол:", reply_markup=gender_kb())
         return
@@ -104,9 +120,9 @@ async def on_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     uid = q.from_user.id
     _, gender = q.data.split(":", 1)
-    p = await store.get_profile(uid)
+    p = await get_profile(uid)
     p["gender"] = gender
-    await store.save_profile(uid, p)
+    await save_profile(uid, p)
     await q.edit_message_text("Пол сохранён ✅\nТеперь выбери возраст:", reply_markup=age_kb())
 
 async def on_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -114,37 +130,36 @@ async def on_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     uid = q.from_user.id
     _, age_range = q.data.split(":", 1)
-    p = await store.get_profile(uid)
+    p = await get_profile(uid)
     p["age_range"] = age_range
-    await store.save_profile(uid, p)
+    await save_profile(uid, p)
     await q.edit_message_text("Возраст сохранён ✅\n\nТвой профиль:\n" + profile_str(p))
     await q.message.reply_text(menu_text("Отлично!"))
 
-# ===== команды =====
+# ===== Команды =====
 async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    p = await store.get_profile(uid)
+    p = await get_profile(uid)
     await update.message.reply_text("Твой профиль:\n" + profile_str(p))
 
 async def cmd_reset_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    await store.reset_profile(uid)
-    await store.clear_pair(uid)
-    await store.remove_from_queue(uid)
+    await reset_profile(uid)
+    await clear_pair(uid)
+    await remove_from_queue(uid)
     await update.message.reply_text("Профиль очищен. Напиши /start.")
 
+# матчинг
 async def try_match(uid: int) -> Optional[int]:
-    # простейший матчинг: пара из очереди, кроме самого себя
     while True:
-        other = await store.pop_queue()
+        other = await pop_queue()
         if other is None:
             return None
         if other == uid:
-            # вернём себя обратно и выйдем
-            await store.push_queue(other)
+            await push_queue(other)
             return None
-        if await store.get_peer(other):
-            # уже занят — ищем следующего
+        # уже занят? ищем следующего
+        if await get_peer(other):
             continue
         return other
 
@@ -155,29 +170,29 @@ async def announce_pair(context: ContextTypes.DEFAULT_TYPE, a: int, b: int):
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    p = await store.get_profile(uid)
+    p = await get_profile(uid)
     if not (p.get("gender") and p.get("age_range")):
         await update.message.reply_text("Сначала заполни профиль: /start")
         return
 
-    if await store.get_peer(uid):
+    if await get_peer(uid):
         await update.message.reply_text("Ты уже в диалоге.\n/next — новый собеседник\n/stop — закончить диалог")
         return
 
     peer = await try_match(uid)
     if peer:
-        await store.set_pair(uid, peer)
+        await set_pair(uid, peer)
         await announce_pair(context, uid, peer)
     else:
-        await store.push_queue(uid)
+        await push_queue(uid)
         await update.message.reply_text("Ищу собеседника… ⏳\n/stop — отменить поиск")
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    peer = await store.get_peer(uid)
-    await store.remove_from_queue(uid)
+    peer = await get_peer(uid)
+    await remove_from_queue(uid)
     if peer:
-        await store.clear_pair(uid)
+        await clear_pair(uid)
         try:
             await context.bot.send_message(chat_id=peer, text="Собеседник завершил диалог. /search — найти нового")
         except Exception as e:
@@ -190,26 +205,40 @@ async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await cmd_stop(update, context)
     await cmd_search(update, context)
 
-# ===== релеинг сообщений =====
+# ===== Релеинг сообщений =====
 async def relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message:
+    msg = update.message
+    if not msg:
         return
     uid = update.effective_user.id
-    peer = await store.get_peer(uid)
+    peer = await get_peer(uid)
     if not peer:
         return
     try:
-        await update.message.copy(chat_id=peer)
+        await msg.copy(chat_id=peer)
     except Exception as e:
         log.error(f"relay error: {e}")
 
-# ===== запуск =====
+# ===== post_init и запуск =====
+async def post_init(app: Application):
+    # гасим вебхук и инициализируем Redis
+    await app.bot.delete_webhook(drop_pending_updates=True)
+
+    if not REDIS_URL:
+        raise RuntimeError("REDIS_URL is not set (persistent storage required).")
+
+    global r
+    r = await redis.from_url(REDIS_URL, decode_responses=True)
+    await r.ping()
+    log.info("Redis connected OK")
+
 def main():
     if not TOKEN:
         raise RuntimeError("TELEGRAM_TOKEN is not set")
 
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).post_init(post_init).build()
 
+    # команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("profile", cmd_profile))
     app.add_handler(CommandHandler("reset_profile", cmd_reset_profile))
@@ -217,11 +246,14 @@ def main():
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("next", cmd_next))
 
+    # анкета
     app.add_handler(CallbackQueryHandler(on_gender, pattern=r"^gender:(M|F)$"))
     app.add_handler(CallbackQueryHandler(on_age, pattern=r"^age:(12-20|21-30|31-40)$"))
 
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.StatusUpdate, relay))
+    # релеим всё, кроме команд
+    app.add_handler(MessageHandler(~filters.COMMAND, relay))
 
+    log.info("Bot starting (run_polling)…")
     app.run_polling()
 
 if __name__ == "__main__":
