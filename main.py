@@ -432,7 +432,15 @@ app.add_handler(MessageHandler(filters.Regex(r"^(18-24|25-34|35-44|45\+)$"), age
 
     # Пересылка любых пользовательских сообщений
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay))
+app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))
 
+# ===== Наши хендлеры для получения ID =====
+app.add_handler(CommandHandler("myid", myid))
+app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, on_channel_post))
+app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+
+# Запуск — БЕЗ await и БЕЗ asyncio.run
+app.run_polling(allowed_updates=Update.ALL_TYPES)
     # Запуск — БЕЗ await и БЕЗ asyncio.run
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
