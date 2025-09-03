@@ -18,7 +18,9 @@ from telegram.ext import (
 
 # Redis (async)
 from redis.asyncio import Redis
+from telegram import InputFile
 
+BANNER_PATH = "banner.jpg.png"
 # ========= ENV =========
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
@@ -32,7 +34,13 @@ PAIR_KEY  = "pair:{uid}"               # ключ пары для юзера
 STAT_MATCH = "stat:matches"
 STAT_MSG   = "stat:messages"
 PROFILE_KEY = "profile:{uid}"          # JSON: {"gender":"M/F", "age_group":"18-24/25-34/35-44/45+", "vip_until": 0}
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await update.effective_chat.send_photo(photo=InputFile(BANNER_PATH))
+    except Exception:
+        await update.effective_chat.send_message("Баннер не найден")
 
+    await update.effective_chat.send_message("Выбери свой пол:")
 # ===== Helpers для получения ID чата/канала =====
 async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
