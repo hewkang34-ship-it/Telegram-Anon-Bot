@@ -416,24 +416,18 @@ def main():
     app.add_handler(CommandHandler("stop", stop_cmd))
     app.add_handler(CommandHandler("rules", rules))
     app.add_handler(CommandHandler("stats", stats))
-    # Обработка VIP-кнопок
-app.add_handler(CallbackQueryHandler(vip_cb, pattern="^vip:"))
-# Обработка выбора пола и возраста
-app.add_handler(MessageHandler(filters.Regex(r"^👨 Мужской$") | filters.Regex(r"^👩 Женский$"), gender_choice))
-app.add_handler(MessageHandler(filters.Regex(r"^(18-24|25-34|35-44|45\+)$"), age_choice))
+        # Обработка VIP-кнопок
+    app.add_handler(CallbackQueryHandler(vip_cb, pattern="^vip:"))
+
+    # Обработка выбора пола и возраста
+    app.add_handler(MessageHandler(filters.Regex(r"^🙋‍♂️ Мужчина$"), gender_male))
+    app.add_handler(MessageHandler(filters.Regex(r"^(18–24|25–34|35–44|45\+)$"), age_choice))
 
     # Кнопки
     app.add_handler(CallbackQueryHandler(cb_query))
 
     # Пересылка любых пользовательских сообщений
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay))
-app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))
-
-# ===== Наши хендлеры для получения ID =====
-app.add_handler(CommandHandler("myid", myid))
-app.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, on_channel_post))
-app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
-
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))
 # Запуск — БЕЗ await и БЕЗ asyncio.run
 app.run_polling(allowed_updates=Update.ALL_TYPES)
 
