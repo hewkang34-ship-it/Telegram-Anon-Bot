@@ -410,7 +410,7 @@ async def main():
     app.add_handler(CallbackQueryHandler(cb))
 
     # Пересылка любых пользовательских сообщений
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, # Запуск (PTB v20)
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, reley))
         # Запуск (PTB v20)
     await app.run_polling()
 
