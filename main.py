@@ -1,39 +1,41 @@
 import os
-from telegram.ext import Updater, CommandHandler
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-def start(update, context):
-    update.message.reply_text("Привет! Я запущен ✅")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Привет! Я запущен ✅")
 
-def find(update, context):
-    update.message.reply_text("Поиск собеседника… (заглушка)")
+async def find(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Поиск собеседника… (заглушка)")
 
-def next_partner(update, context):
-    update.message.reply_text("Следующий собеседник… (заглушка)")
+async def next_partner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Следующий собеседник… (заглушка)")
 
-def stop_chat(update, context):
-    update.message.reply_text("Чат остановлен. Напиши /start, чтобы начать снова.")
+async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Чат остановлен. Напиши /find чтобы начать снова")
 
-def rules(update, context):
-    update.message.reply_text("Правила: будь вежлив, без спама и нарушений закона.")
+async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Правила: будь вежлив, не нарушай закон 🚫")
 
-def stats(update, context):
-    update.message.reply_text("Статистика (заглушка): онлайн 0, в поиске 0.")
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Статистика (заглушка): 0 чатов")
+
+def main():
+    if not TOKEN:
+        raise SystemExit("Нет TELEGRAM_TOKEN в переменных окружения!")
+
+    app = Application.builder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("find", find))
+    app.add_handler(CommandHandler("next", next_partner))
+    app.add_handler(CommandHandler("stop", stop_chat))
+    app.add_handler(CommandHandler("rules", rules))
+    app.add_handler(CommandHandler("stats", stats))
+
+    app.run_polling()
 
 if __name__ == "__main__":
-    if not TOKEN:
-        raise SystemExit("Нет TELEGRAM_TOKEN в переменных окружения")
-
-    updater = Updater(TOKEN, use_context=True)
-    dp = updater.dispatcher
-
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("find", find))
-    dp.add_handler(CommandHandler("next", next_partner))
-    dp.add_handler(CommandHandler("stop", stop_chat))
-    dp.add_handler(CommandHandler("rules", rules))
-    dp.add_handler(CommandHandler("stats", stats))
-
-    updater.start_polling()
-    updater.idle()
+    main()
