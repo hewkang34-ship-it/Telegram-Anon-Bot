@@ -145,4 +145,9 @@ async def main():
     await app.run_polling(close_loop=False)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import asyncio
+
+    try:
+        asyncio.get_event_loop().run_until_complete(main())
+    except KeyboardInterrupt:
+        pass
