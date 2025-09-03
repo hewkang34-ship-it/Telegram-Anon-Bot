@@ -104,7 +104,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     target = update.message or update.effective_chat
     await target.reply_text("Выбери действие:", reply_markup=reply_markup)
-    ]
+    
     reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     await update.message.reply_text(
         "Отлично! Теперь выбери возрастную категорию:",
