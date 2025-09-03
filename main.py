@@ -4,7 +4,8 @@ from typing import Optional
 
 from telegram import (
     Update, Message,
-    InlineKeyboardMarkup, InlineKeyboardButton
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
