@@ -112,6 +112,93 @@ async def age_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ Профиль сохранён! Теперь ты можешь начать поиск собеседника.\n\n"
         "Используй /find чтобы найти чат, /stop чтобы завершить."
     )
+# ====== VIP / меню поиска ======
+from datetime import datetime, timedelta
+
+CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "0"))  # id канала для проверки подписки (формат -100xxxxxxxxxx)
+
+def _now() -> int:
+    return int(datetime.utcnow().timestamp())
+
+async def is_vip(uid: int) -> bool:
+    p = await load_profile(uid)
+    return int(p.get("vip_until", 0)) > _now()
+
+async def grant_vip(uid: int, hours: int):
+    p = await load_profile(uid)
+    p["vip_until"] = _now() + hours * 3600
+    await save_profile(uid, p)
+
+async def ensure_vip_or_offer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Возвращает True, если VIP уже есть. Иначе показывает оффер и возвращает False."""
+    uid = update.effective_user.id
+    if await is_vip(uid):
+        return True
+
+    btns = [
+        [InlineKeyboardButton("📣 Подписаться на канал", url=f"https://t.me/{context.bot.username}")],  # поменяй URL на свой канал!
+        [InlineKeyboardButton("✅ Я подписался — проверить", callback_data="vip:check")],
+        [
+            InlineKeyboardButton("💳 0.99$ / 1 мес.", callback_data="vip:buy:1m"),
+            InlineKeyboardButton("💳 7.99$ / 3 мес.", callback_data="vip:buy:3m"),
+            InlineKeyboardButton("💳 4.99$ / 7 мес.", callback_data="vip:buy:7m"),
+        ],
+    ]
+    await update.effective_chat.send_message(
+        "🔒 Поиск по полу доступен только VIP-пользователям.\n"
+        "Получить VIP на 3 часа — за подписку на канал и проверку.\n"
+        "Или купи подписку:",
+        reply_markup=InlineKeyboardMarkup(btns),
+    )
+    return False
+
+async def vip_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Колбэки VIP."""
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    data = q.data
+
+    if data == "vip:check":
+        # Проверяем подписку на канал (бот должен быть админом в канале)
+        if CHANNEL_ID == 0:
+            await q.edit_message_text("Не настроен CHANNEL_ID. Укажи переменную окружения CHANNEL_ID.")
+            return
+        try:
+            member = await context.bot.get_chat_member(CHANNEL_ID, uid)
+            if member.status in ("creator", "administrator", "member", "restricted"):
+                await grant_vip(uid, 3)  # 3 часа
+                await q.edit_message_text("✅ Подписка подтверждена! VIP на 3 часа активирован.")
+            else:
+                await q.edit_message_text("Похоже, ты не подписан. Подпишись и нажми «Проверить».")
+        except Exception:
+            await q.edit_message_text("Не удалось проверить подписку. Убедись, что бот админ в канале.")
+        return
+
+    if data.startswith("vip:buy:"):
+        period = data.split(":")[-1]
+        await q.edit_message_text(
+            "💳 Оплата скоро будет подключена. Пока доступна только бесплатная VIP за подписку на канал."
+        )
+        return
+
+# ====== обработчики пунктов меню ======
+
+async def free_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # обычный поиск (как твоя команда /find)
+    await find_cmd(update, context)
+
+async def search_female(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_vip_or_offer(update, context):
+        return
+    # здесь можно фильтровать очередь по полу, а пока — обычный запуск поиска
+    await find_cmd(update, context)
+
+async def search_male(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_vip_or_offer(update, context):
+        return
+    # здесь можно фильтровать очередь по полу, а пока — обычный запуск поиска
+    await find_cmd(update, context)
 
 
 async def clear_pair(uid: int):
