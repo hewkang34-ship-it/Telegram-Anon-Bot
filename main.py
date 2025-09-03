@@ -13,105 +13,49 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 log = logging.getLogger("anonchat")
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-REDIS_URL = os.environ.get("REDIS_URL")  # опционально
 
-# ===== Хранилище (Redis -> in-memory) =====
-class Store:
+# ===== In-memory store (без внешних зависимостей) =====
+class MemStore:
     def __init__(self):
-        self._mem_profiles: Dict[int, dict] = {}
-        self._mem_pairs: Dict[int, int] = {}
-        self._mem_queue: list[int] = []
-        self._redis = None
+        self.profiles: Dict[int, dict] = {}     # uid -> {"gender": "M/F", "age_range": "..."}
+        self.pairs: Dict[int, int] = {}         # uid -> peer_uid
+        self.queue: list[int] = []              # простая очередь
 
-    async def init(self):
-        if not REDIS_URL:
-            log.warning("REDIS_URL not set. Using in-memory store.")
-            return
-        try:
-            import redis.asyncio as redis
-            self._redis = await redis.from_url(REDIS_URL, decode_responses=True)
-            await self._redis.ping()
-            log.info("Redis connected OK")
-        except Exception as e:
-            log.error(f"Redis connect failed: {e}. Fallback to in-memory.")
-            self._redis = None
-
-    # ---- Профили ----
     async def get_profile(self, uid: int) -> dict:
-        if self._redis:
-            raw = await self._redis.get(f"profile:{uid}")
-            if not raw:
-                return {"gender": None, "age_range": None}
-            try:
-                return json.loads(raw)
-            except Exception:
-                return {"gender": None, "age_range": None}
-        return self._mem_profiles.get(uid, {"gender": None, "age_range": None})
+        return self.profiles.get(uid, {"gender": None, "age_range": None})
 
     async def save_profile(self, uid: int, data: dict):
-        if self._redis:
-            await self._redis.set(f"profile:{uid}", json.dumps(data))
-        else:
-            self._mem_profiles[uid] = data
+        self.profiles[uid] = data
 
     async def reset_profile(self, uid: int):
-        if self._redis:
-            await self._redis.delete(f"profile:{uid}")
-        self._mem_profiles.pop(uid, None)
+        self.profiles.pop(uid, None)
 
-    # ---- Пары ----
     async def get_peer(self, uid: int) -> Optional[int]:
-        if self._redis:
-            val = await self._redis.get(f"pair:{uid}")
-            return int(val) if val else None
-        return self._mem_pairs.get(uid)
+        return self.pairs.get(uid)
 
     async def set_pair(self, a: int, b: int):
-        if self._redis:
-            await self._redis.set(f"pair:{a}", b)
-            await self._redis.set(f"pair:{b}", a)
-        else:
-            self._mem_pairs[a] = b
-            self._mem_pairs[b] = a
+        self.pairs[a] = b
+        self.pairs[b] = a
 
     async def clear_pair(self, uid: int):
-        peer = await self.get_peer(uid)
-        if self._redis:
-            await self._redis.delete(f"pair:{uid}")
-            if peer:
-                await self._redis.delete(f"pair:{peer}")
-        else:
-            self._mem_pairs.pop(uid, None)
-            if peer:
-                self._mem_pairs.pop(peer, None)
+        peer = self.pairs.pop(uid, None)
+        if peer is not None:
+            self.pairs.pop(peer, None)
 
-    # ---- Очередь ----
     async def push_queue(self, uid: int):
-        if self._redis:
-            # не добавляем дубликаты
-            members = await self._redis.lrange("q:global", 0, -1)
-            if str(uid) not in members:
-                await self._redis.rpush("q:global", uid)
-            return
-        if uid not in self._mem_queue:
-            self._mem_queue.append(uid)
+        if uid not in self.queue:
+            self.queue.append(uid)
 
     async def pop_queue(self) -> Optional[int]:
-        if self._redis:
-            val = await self._redis.lpop("q:global")
-            return int(val) if val else None
-        if self._mem_queue:
-            return self._mem_queue.pop(0)
+        if self.queue:
+            return self.queue.pop(0)
         return None
 
     async def remove_from_queue(self, uid: int):
-        if self._redis:
-            await self._redis.lrem("q:global", 0, uid)
-        else:
-            if uid in self._mem_queue:
-                self._mem_queue.remove(uid)
+        if uid in self.queue:
+            self.queue.remove(uid)
 
-store = Store()
+store = MemStore()
 
 # ===== UI =====
 def gender_kb() -> InlineKeyboardMarkup:
@@ -142,7 +86,7 @@ def menu_text(prefix: str = "") -> str:
         "/stop — остановить диалог"
     )
 
-# ===== Handlers =====
+# ===== анкета =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     p = await store.get_profile(uid)
@@ -173,12 +117,10 @@ async def on_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
     p = await store.get_profile(uid)
     p["age_range"] = age_range
     await store.save_profile(uid, p)
-    await q.edit_message_text(
-        "Возраст сохранён ✅\n\nТвой профиль:\n" + profile_str(p)
-    )
+    await q.edit_message_text("Возраст сохранён ✅\n\nТвой профиль:\n" + profile_str(p))
     await q.message.reply_text(menu_text("Отлично!"))
 
-# --- Команды: профиль/сброс ---
+# ===== команды =====
 async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     p = await store.get_profile(uid)
@@ -191,52 +133,44 @@ async def cmd_reset_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await store.remove_from_queue(uid)
     await update.message.reply_text("Профиль очищен. Напиши /start.")
 
-# --- Матчинг ---
 async def try_match(uid: int) -> Optional[int]:
-    # простая глобальная очередь; фильтры по полу/возрасту добавим позже (VIP)
+    # простейший матчинг: пара из очереди, кроме самого себя
     while True:
         other = await store.pop_queue()
         if other is None:
             return None
         if other == uid:
-            # не матчим с самим собой; вернём его назад в очередь (хвост)
+            # вернём себя обратно и выйдем
             await store.push_queue(other)
             return None
-        # если другой уже с кем-то, ищем дальше
         if await store.get_peer(other):
+            # уже занят — ищем следующего
             continue
         return other
 
 async def announce_pair(context: ContextTypes.DEFAULT_TYPE, a: int, b: int):
     text = "Собеседник найден 👤\n\n/next — искать нового собеседника\n/stop — закончить диалог"
-    try:
-        await context.bot.send_message(chat_id=a, text=text)
-        await context.bot.send_message(chat_id=b, text=text)
-    except Exception as e:
-        log.error(f"announce_pair error: {e}")
+    await context.bot.send_message(chat_id=a, text=text)
+    await context.bot.send_message(chat_id=b, text=text)
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    # профиль должен быть заполнен
     p = await store.get_profile(uid)
     if not (p.get("gender") and p.get("age_range")):
         await update.message.reply_text("Сначала заполни профиль: /start")
         return
-    # если уже в диалоге — просто подсказываем команды
+
     if await store.get_peer(uid):
         await update.message.reply_text("Ты уже в диалоге.\n/next — новый собеседник\n/stop — закончить диалог")
         return
 
-    # моментальный матч
     peer = await try_match(uid)
     if peer:
         await store.set_pair(uid, peer)
         await announce_pair(context, uid, peer)
-        return
-
-    # иначе — в очередь
-    await store.push_queue(uid)
-    await update.message.reply_text("Ищу собеседника… ⏳\n/stop — отменить поиск")
+    else:
+        await store.push_queue(uid)
+        await update.message.reply_text("Ищу собеседника… ⏳\n/stop — отменить поиск")
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -253,38 +187,29 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Поиск остановлен.")
 
 async def cmd_next(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # next = stop + search
     await cmd_stop(update, context)
-    # вызовем поиск сразу после stop
     await cmd_search(update, context)
 
-# --- Релеинг всех сообщений между собеседниками ---
+# ===== релеинг сообщений =====
 async def relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
     uid = update.effective_user.id
     peer = await store.get_peer(uid)
     if not peer:
-        # не в диалоге — подскажем команды
         return
     try:
         await update.message.copy(chat_id=peer)
     except Exception as e:
         log.error(f"relay error: {e}")
 
-# ===== post_init и Bootstrap =====
-async def post_init(app: Application):
-    await app.bot.delete_webhook(drop_pending_updates=True)
-    await store.init()
-    log.info("post_init done (webhook deleted, store initialized)")
-
+# ===== запуск =====
 def main():
     if not TOKEN:
         raise RuntimeError("TELEGRAM_TOKEN is not set")
 
-    app = Application.builder().token(TOKEN).post_init(post_init).build()
+    app = Application.builder().token(TOKEN).build()
 
-    # команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("profile", cmd_profile))
     app.add_handler(CommandHandler("reset_profile", cmd_reset_profile))
@@ -292,14 +217,11 @@ def main():
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("next", cmd_next))
 
-    # кнопки анкеты
     app.add_handler(CallbackQueryHandler(on_gender, pattern=r"^gender:(M|F)$"))
     app.add_handler(CallbackQueryHandler(on_age, pattern=r"^age:(12-20|21-30|31-40)$"))
 
-    # релеим всё, кроме команд/сервисных апдейтов
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.StatusUpdate, relay))
 
-    log.info("Bot starting (run_polling)…")
     app.run_polling()
 
 if __name__ == "__main__":
