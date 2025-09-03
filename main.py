@@ -31,7 +31,22 @@ STAT_MSG   = "stat:messages"
 # ----- Профили пользователей -----
 import json
 PROFILE_KEY = "profile:{uid}"   # JSON: {"gender":"M/F", "age_group":"12-20/21-30/31-40", "vip_until": 0}
+# ===== Helpers для получения ID чата/канала =====
 
+async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    text = f"Тип: {chat.type}\nID: {chat.id}"
+    if getattr(chat, "username", None):
+        text += f"\n@{chat.username}"
+    await update.effective_message.reply_text(text)
+
+async def on_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    logging.info("CHANNEL_POST -> id=%s title=%s", chat.id, getattr(chat, "title", None))
+
+async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    logging.info("MY_CHAT_MEMBER -> id=%s title=%s", chat.id, getattr(chat, "title", None))
 async def load_profile(uid: int) -> dict:
     raw = await redis.get(PROFILE_KEY.format(uid=uid))
     if not raw:
