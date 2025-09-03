@@ -14,13 +14,13 @@ async def next_partner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Следующий собеседник… (заглушка)")
 
 async def stop_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Чат остановлен. Напиши /find чтобы начать снова")
+    await update.message.reply_text("Чат остановлен. Напиши /start, чтобы начать заново.")
 
 async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Правила: будь вежлив, не нарушай закон 🚫")
+    await update.message.reply_text("Правила: будь вежлив, не спамь, уважай собеседника.")
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Статистика (заглушка): 0 чатов")
+    await update.message.reply_text("Статистика (заглушка): 0 пользователей онлайн.")
 
 def main():
     if not TOKEN:
