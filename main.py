@@ -3,10 +3,10 @@ import json
 import logging
 from typing import Optional
 
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler,
-    ContextTypes, filters
+    ContextTypes, filters, PreCheckoutQueryHandler
 )
 
 import redis.asyncio as redis
@@ -23,6 +23,118 @@ r: Optional[redis.Redis] = None
 PROFILE_KEY = "profile:{uid}"   # JSON
 PAIR_KEY    = "pair:{uid}"      # int
 QUEUE_KEY   = "q:global"        # list
+
+# ====== VIP (Telegram Stars) ======
+VIP_KEY     = "vip_until:{uid}"  # int (unix time)
+CURRENCY_XTR = "XTR"             # Telegram Stars
+PROVIDER_TOKEN = ""              # для Stars — пустая строка
+
+VIP_PLANS = {
+    "3m":  {"months": 3,  "amount": 1299, "title": "VIP • 3 months"},
+    "6m":  {"months": 6,  "amount": 2399, "title": "VIP • 6 months"},
+    "12m": {"months": 12, "amount": 4499, "title": "VIP • 12 months"},
+}
+
+def vip_k(uid: int) -> str:
+    return VIP_KEY.format(uid=uid)
+
+async def get_vip_until(uid: int) -> int:
+    val = await r.get(vip_k(uid))
+    return int(val) if val else 0
+
+async def is_vip(uid: int) -> bool:
+    from time import time as now
+    return (await get_vip_until(uid)) > int(now())
+
+async def extend_vip(uid: int, months: int) -> int:
+    """Продлеваем VIP: добавляем ~30 дней за месяц."""
+    from time import time as now
+    now_i = int(now())
+    current = await get_vip_until(uid)
+    base = max(now_i, current)
+    new_until = base + int(30 * 24 * 3600 * months)
+    await r.set(vip_k(uid), new_until)
+    return new_until
+
+def vip_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⭐ 3 months — 1299 Stars", callback_data="vip_buy:3m")],
+        [InlineKeyboardButton("⭐ 6 months — 2399 Stars", callback_data="vip_buy:6m")],
+        [InlineKeyboardButton("⭐ 12 months — 4499 Stars", callback_data="vip_buy:12m")],
+    ])
+
+async def cmd_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    until = await get_vip_until(uid)
+    from time import time as now
+    active = until > int(now())
+    left = max(0, until - int(now()))
+    days = left // 86400
+    hours = (left % 86400) // 3600
+    status = "✅ Active" if active else "❌ Not active"
+    txt = (
+        f"<b>VIP Subscription</b>\n"
+        f"Status: {status}\n"
+        f"Time left: {days}d {hours}h\n\n"
+        "VIP даёт приоритет в поиске (и позже — расширенные фильтры)."
+    )
+    await update.message.reply_html(txt, reply_markup=vip_menu_kb())
+
+async def cb_vip_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    try:
+        _, plan_key = q.data.split(":", 1)
+    except Exception:
+        await q.edit_message_text("Plan not found, try again.")
+        return
+
+    plan = VIP_PLANS.get(plan_key)
+    if not plan:
+        await q.edit_message_text("Plan not found, try again.")
+        return
+
+    title = plan["title"]
+    description = "VIP access for Anonymous Chat (priority in search)."
+    payload = f"vip_{plan_key}"
+    prices = [LabeledPrice(label=title, amount=plan["amount"])]
+
+    await context.bot.send_invoice(
+        chat_id=update.effective_chat.id,
+        title=title,
+        description=description,
+        payload=payload,
+        provider_token=PROVIDER_TOKEN,     # Stars → пусто
+        currency=CURRENCY_XTR,             # Stars
+        prices=prices,
+        start_parameter="vip",
+        need_name=False,
+        need_phone_number=False,
+        need_email=False,
+        need_shipping_address=False,
+        is_flexible=False,
+    )
+
+async def precheckout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Для Stars — просто подтверждаем
+    await update.pre_checkout_query.answer(ok=True)
+
+async def successful_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sp = update.message.successful_payment
+    payload = sp.invoice_payload or ""
+    plan_key = "3m"
+    if payload.startswith("vip_"):
+        plan_key = payload.split("_", 1)[1] or "3m"
+    months = VIP_PLANS.get(plan_key, VIP_PLANS["3m"])["months"]
+
+    uid = update.effective_user.id
+    new_until = await extend_vip(uid, months)
+    from datetime import datetime
+    until_s = datetime.fromtimestamp(new_until).strftime("%Y-%m-%d %H:%M")
+
+    await update.message.reply_html(
+        f"🎉 <b>VIP activated!</b>\nValid until: <code>{until_s}</code>\nСпасибо за поддержку 🙏"
+    )
 
 # ===== UI =====
 def gender_kb() -> InlineKeyboardMarkup:
@@ -50,7 +162,8 @@ def menu_text(prefix: str = "") -> str:
         + "Теперь можно приступить к поиску собеседника!\n\n"
         "/search — поиск собеседника\n"
         "/next — следующий собеседник\n"
-        "/stop — остановить диалог"
+        "/stop — остановить диалог\n"
+        "/vip — VIP и оплата Stars"
     )
 
 # ===== Профили =====
@@ -149,8 +262,9 @@ async def cmd_reset_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await remove_from_queue(uid)
     await update.message.reply_text("Профиль очищен. Напиши /start.")
 
-# матчинг
+# ===== Матчинг =====
 async def try_match(uid: int) -> Optional[int]:
+    """Обычный (для невипов): достаём из головы очереди первого свободного."""
     while True:
         other = await pop_queue()
         if other is None:
@@ -162,6 +276,20 @@ async def try_match(uid: int) -> Optional[int]:
         if await get_peer(other):
             continue
         return other
+
+async def try_match_vip(uid: int) -> Optional[int]:
+    """VIP-поиск: пробегаем всю очередь и берём первого свободного, удаляя его."""
+    members = await r.lrange(QUEUE_KEY, 0, -1)
+    for raw in members:
+        other = int(raw)
+        if other == uid:
+            continue
+        if await get_peer(other):
+            continue
+        # удалить конкретного other из очереди
+        await r.lrem(QUEUE_KEY, 1, other)
+        return other
+    return None
 
 async def announce_pair(context: ContextTypes.DEFAULT_TYPE, a: int, b: int):
     text = "Собеседник найден 👤\n\n/next — искать нового собеседника\n/stop — закончить диалог"
@@ -179,7 +307,13 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Ты уже в диалоге.\n/next — новый собеседник\n/stop — закончить диалог")
         return
 
-    peer = await try_match(uid)
+    # VIP-приоритет: сначала пробуем vip-поиск
+    peer = None
+    if await is_vip(uid):
+        peer = await try_match_vip(uid)
+    if not peer:
+        peer = await try_match(uid)
+
     if peer:
         await set_pair(uid, peer)
         await announce_pair(context, uid, peer)
@@ -245,10 +379,16 @@ def main():
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("next", cmd_next))
+    app.add_handler(CommandHandler("vip", cmd_vip))  # <— добавили
 
     # анкета
     app.add_handler(CallbackQueryHandler(on_gender, pattern=r"^gender:(M|F)$"))
     app.add_handler(CallbackQueryHandler(on_age, pattern=r"^age:(12-20|21-30|31-40)$"))
+
+    # VIP покупки (кнопки и платежи)
+    app.add_handler(CallbackQueryHandler(cb_vip_buy, pattern=r"^vip_buy:(3m|6m|12m)$"))
+    app.add_handler(PreCheckoutQueryHandler(precheckout_handler))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
 
     # релеим всё, кроме команд
     app.add_handler(MessageHandler(~filters.COMMAND, relay))
