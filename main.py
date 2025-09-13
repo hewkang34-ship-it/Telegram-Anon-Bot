@@ -22,18 +22,17 @@ log = logging.getLogger("anonchat")
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 REDIS_URL = os.environ.get("REDIS_URL")  # redis://default:<pass>@<host>:<port>/0
 
-# Картинки (URL). Если пусто — шлём только текст.
 DIAMOND_IMG_URL = os.environ.get("DIAMOND_IMG_URL", "")
 HALO_IMG_URL    = os.environ.get("HALO_IMG_URL", "")
 
 # ===== Redis =====
 r: Optional[redis.Redis] = None
-PROFILE_KEY = "profile:{uid}"    # JSON
-PAIR_KEY    = "pair:{uid}"       # int
-QUEUE_KEY   = "q:global"         # list
-VIP_KEY     = "vip_until:{uid}"  # int (unix time)
-RATES_KEY   = "rates:{uid}"      # list of json {"peer":id,"v":1/-1,"ts":...}
-REPORTS_KEY = "reports:{uid}"    # list of json {"peer":id,"reason":str,"ts":...}
+PROFILE_KEY = "profile:{uid}"
+PAIR_KEY    = "pair:{uid}"
+QUEUE_KEY   = "q:global"
+VIP_KEY     = "vip_until:{uid}"
+RATES_KEY   = "rates:{uid}"
+REPORTS_KEY = "reports:{uid}"
 
 # ===== Payments (Telegram Stars) =====
 CURRENCY_XTR   = "XTR"
@@ -44,19 +43,19 @@ VIP_PLANS = {
     "12m": {"months": 12, "amount": 4499, "title": "VIP • 12 months"},
 }
 
-# ===== Reply-клавиатура (нижнее меню) =====
+# ===== Reply-клавиатура =====
 BTN_ANY = "🚀 Поиск любого собеседника"
 BTN_F   = "🙋‍♀️ Поиск Ж"
 BTN_M   = "🙋‍♂️ Поиск М"
 
 def reply_menu_kb() -> ReplyKeyboardMarkup:
+    # Убрали is_persistent — бывает не поддерживается
     return ReplyKeyboardMarkup(
         keyboard=[[BTN_ANY],[BTN_F, BTN_M]],
         resize_keyboard=True,
         one_time_keyboard=False,
         input_field_placeholder="Выберите тип поиска…",
         selective=True,
-        is_persistent=True,
     )
 
 def hide_reply_kb() -> ReplyKeyboardRemove:
@@ -101,35 +100,55 @@ def menu_text_no_vip(prefix: str = "") -> str:
 # ===== Helpers/VIP =====
 def vip_k(uid: int) -> str: return VIP_KEY.format(uid=uid)
 async def get_vip_until(uid: int) -> int:
-    val = await r.get(vip_k(uid));  return int(val) if val else 0
-async def is_vip(uid: int) -> bool: return (await get_vip_until(uid)) > int(time.time())
+    val = await r.get(vip_k(uid))
+    return int(val) if val else 0
+async def is_vip(uid: int) -> bool:
+    return (await get_vip_until(uid)) > int(time.time())
 async def extend_vip(uid: int, months: int) -> int:
-    now_i = int(time.time());  base = max(now_i, await get_vip_until(uid))
+    now_i = int(time.time())
+    base = max(now_i, await get_vip_until(uid))
     new_until = base + int(30*24*3600*months)
-    await r.set(vip_k(uid), new_until);  return new_until
+    await r.set(vip_k(uid), new_until)
+    return new_until
 
 # ===== Profiles/Pairs/Queue =====
 async def get_profile(uid: int) -> dict:
     raw = await r.get(PROFILE_KEY.format(uid=uid))
-    if not raw: return {"gender": None, "age_range": None}
-    try: return json.loads(raw)
-    except: return {"gender": None, "age_range": None}
+    if not raw:
+        return {"gender": None, "age_range": None}
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {"gender": None, "age_range": None}
 
 async def save_profile(uid: int, data: dict): await r.set(PROFILE_KEY.format(uid=uid), json.dumps(data))
 async def reset_profile(uid: int): await r.delete(PROFILE_KEY.format(uid=uid))
 
 async def get_peer(uid: int) -> Optional[int]:
-    val = await r.get(PAIR_KEY.format(uid=uid));  return int(val) if val else None
+    val = await r.get(PAIR_KEY.format(uid=uid))
+    return int(val) if val else None
+
 async def set_pair(a: int, b: int):
-    pipe = r.pipeline();  pipe.set(PAIR_KEY.format(uid=a), b);  pipe.set(PAIR_KEY.format(uid=b), a);  await pipe.execute()
+    pipe = r.pipeline()
+    pipe.set(PAIR_KEY.format(uid=a), b)
+    pipe.set(PAIR_KEY.format(uid=b), a)
+    await pipe.execute()
+
 async def clear_pair(uid: int):
-    peer = await get_peer(uid);  pipe = r.pipeline();  pipe.delete(PAIR_KEY.format(uid=uid));  if peer: pipe.delete(PAIR_KEY.format(uid=peer));  await pipe.execute()
+    peer = await get_peer(uid)
+    pipe = r.pipeline()
+    pipe.delete(PAIR_KEY.format(uid=uid))
+    if peer:
+        pipe.delete(PAIR_KEY.format(uid=peer))
+    await pipe.execute()
 
 async def push_queue(uid: int):
     members = await r.lrange(QUEUE_KEY, 0, -1)
-    if str(uid) not in members: await r.rpush(QUEUE_KEY, uid)
+    if str(uid) not in members:
+        await r.rpush(QUEUE_KEY, uid)
 async def pop_queue() -> Optional[int]:
-    val = await r.lpop(QUEUE_KEY);  return int(val) if val else None
+    val = await r.lpop(QUEUE_KEY)
+    return int(val) if val else None
 async def remove_from_queue(uid: int): await r.lrem(QUEUE_KEY, 0, uid)
 
 # ===== START / анкета =====
@@ -141,7 +160,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not p["age_range"]:
         await update.message.reply_text("Укажи возраст:", reply_markup=age_kb());  return
     await update.message.reply_text("Профиль уже заполнен ✅\n" + profile_str(p))
-    await update.message.reply_text(menu_text_no_vip("Отлично!"))  # без /vip и без клавиатуры
+    await update.message.reply_text(menu_text_no_vip("Отлично!"))
 
 async def on_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query;  await q.answer()
@@ -161,8 +180,11 @@ async def try_match(uid: int) -> Optional[int]:
     while True:
         other = await pop_queue()
         if other is None: return None
-        if other == uid: await push_queue(other); return None
-        if await get_peer(other): continue
+        if other == uid:
+            await push_queue(other)
+            return None
+        if await get_peer(other):  # уже занят
+            continue
         return other
 
 async def try_match_vip(uid: int) -> Optional[int]:
@@ -171,7 +193,8 @@ async def try_match_vip(uid: int) -> Optional[int]:
         other = int(raw)
         if other == uid: continue
         if await get_peer(other): continue
-        await r.lrem(QUEUE_KEY, 1, other);  return other
+        await r.lrem(QUEUE_KEY, 1, other)
+        return other
     return None
 
 async def announce_pair(context: ContextTypes.DEFAULT_TYPE, a: int, b: int):
@@ -193,7 +216,8 @@ async def do_search(chat_id: int, uid: int, context: ContextTypes.DEFAULT_TYPE):
     if peer:
         await set_pair(uid, peer);  await announce_pair(context, uid, peer)
     else:
-        await push_queue(uid);  await context.bot.send_message(chat_id, "Ищу собеседника… ⏳\n/stop — отменить поиск", reply_markup=hide_reply_kb())
+        await push_queue(uid)
+        await context.bot.send_message(chat_id, "Ищу собеседника… ⏳\n/stop — отменить поиск", reply_markup=hide_reply_kb())
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await do_search(update.effective_chat.id, update.effective_user.id, context)
@@ -203,7 +227,6 @@ RATE_MENU = InlineKeyboardMarkup([
     [InlineKeyboardButton("👍🏻", callback_data="rate:+"), InlineKeyboardButton("👎🏻", callback_data="rate:-")],
     [InlineKeyboardButton("⚠️Пожаловаться", callback_data="report:open")],
 ])
-
 REPORT_MENU = InlineKeyboardMarkup([
     [InlineKeyboardButton("📰 Реклама", callback_data="report:Реклама")],
     [InlineKeyboardButton("💰 Продажа", callback_data="report:Продажа")],
@@ -225,9 +248,7 @@ async def on_rate_or_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query;  await q.answer()
     uid = q.from_user.id
     data = q.data
-
-    peer = await get_peer(uid)  # после завершения обычно None; но мы использовали последнего собеседника?
-    # Для логов сохраним текущего peer, если есть
+    peer = await get_peer(uid)
     peer_id = peer if peer else 0
 
     if data == "report:open":
@@ -239,15 +260,13 @@ async def on_rate_or_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = 1 if data.endswith("+") else -1
         rec = {"peer": peer_id, "v": val, "ts": int(time.time())}
         await r.rpush(RATES_KEY.format(uid=uid), json.dumps(rec))
-        await q.edit_message_text("Спасибо! Оценка сохранена ✅")
-        return
+        await q.edit_message_text("Спасибо! Оценка сохранена ✅");  return
 
     if data.startswith("report:"):
         reason = data.split(":",1)[1]
         rec = {"peer": peer_id, "reason": reason, "ts": int(time.time())}
         await r.rpush(REPORTS_KEY.format(uid=uid), json.dumps(rec))
-        await q.edit_message_text("Спасибо! Жалоба отправлена ⚠️")
-        return
+        await q.edit_message_text("Спасибо! Жалоба отправлена ⚠️");  return
 
 # ===== STOP / NEXT =====
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -282,7 +301,7 @@ async def relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try: await msg.copy(chat_id=peer)
     except Exception as e: log.error(f"relay error: {e}")
 
-# ===== VIP UI / оплатa =====
+# ===== VIP UI / оплата =====
 def vip_menu_inline() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"💎 VIP на 3 мес — {VIP_PLANS['3m']['amount']}⭐",  callback_data="vip_buy:3m")],
@@ -292,7 +311,7 @@ def vip_menu_inline() -> InlineKeyboardMarkup:
 
 async def cmd_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    until = await get_vip_until(uid := update.effective_user.id)
+    until = await get_vip_until(uid)
     active = until > int(time.time())
     left = max(0, until - int(time.time()))
     days = left // 86400; hours = (left % 86400) // 3600
@@ -346,7 +365,6 @@ async def successful_payment_handler(update: Update, context: ContextTypes.DEFAU
     if HALO_IMG_URL: await update.message.reply_photo(HALO_IMG_URL, caption=text, reply_markup=reply_menu_kb())
     else: await update.message.reply_text(text, reply_markup=reply_menu_kb())
 
-# Ворота VIP для кнопок Ж/М
 async def show_vip_gate(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     text = "Поиск по полу доступен только VIP-пользователям 💎.\n\nДля приобретения VIP-статуса напишите /vip"
     if DIAMOND_IMG_URL: await context.bot.send_photo(chat_id, DIAMOND_IMG_URL, caption=text)
@@ -369,7 +387,7 @@ async def cmd_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(peer, text)
     await update.message.reply_text("Ссылку отправил собеседнику ✅")
 
-# ===== Кнопки Reply (нижнее меню) =====
+# ===== Кнопки Reply =====
 async def on_btn_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await do_search(update.effective_chat.id, update.effective_user.id, context)
 async def on_btn_f(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -381,13 +399,12 @@ async def on_btn_m(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_vip_gate(update.effective_chat.id, context);  return
     await do_search(update.effective_chat.id, update.effective_user.id, context)
 
-# ===== Прочие команды под меню =====
+# ===== Доп. команды из меню =====
 async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📜 Правила: уважайте собеседника, не нарушайте законы, без спама и оскорблений. За нарушения возможен бан.")
+    await update.message.reply_text("📖 Правила: уважайте собеседника, без спама, угроз и нарушений закона. За нарушения — блокировка.")
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚙️ Настройки: пол/возраст меняются через /start (заново пройти мини-анкеты). Технастройки — скоро.")
+    await update.message.reply_text("⚙️ Настройки: пол/возраст меняются через /start (пройти мини-анкеты заново).")
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # простая статистика: количество оценок/жалоб
     uid = update.effective_user.id
     rates = await r.llen(RATES_KEY.format(uid=uid))
     reports = await r.llen(REPORTS_KEY.format(uid=uid))
@@ -395,35 +412,39 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🆔 ID вашего аккаунта: <code>{update.effective_user.id}</code>", parse_mode="HTML")
 
-# ===== post_init / команды меню =====
+# ===== post_init / меню команд =====
 async def post_init(app: Application):
     await app.bot.delete_webhook(drop_pending_updates=True)
-    if not REDIS_URL: raise RuntimeError("REDIS_URL is not set (persistent storage required).")
+    if not REDIS_URL:
+        raise RuntimeError("REDIS_URL is not set")
 
     global r
-    r = await redis.from_url(REDIS_URL, decode_responses=True);  await r.ping()
+    r = await redis.from_url(REDIS_URL, decode_responses=True)
+    await r.ping()
     log.info("Redis connected OK")
 
-    # Меню команд (как на скрине 2, исключая interests/help/paysupport)
-    commands = [
-        BotCommand("start", "🔄 Начать"),
-        BotCommand("search", "🔎 Поиск собеседника"),
-        BotCommand("next", "🆕 Закончить диалог и искать нового собеседника"),
-        BotCommand("stop", "⛔ Закончить диалог с собеседником"),
-        BotCommand("vip", "💎 Стать VIP-пользователем"),
-        BotCommand("link", "🔗 Отправить ссылку на ваш Telegram собеседнику"),
-        BotCommand("settings", "⚙️ Настройки пола, возраста и технические настройки"),
-        BotCommand("rules", "📖 Правила общения в чате"),
-        BotCommand("stats", "📊 Статистика"),
-        BotCommand("myid", "🆔 Отобразить ID вашего аккаунта"),
-        # Дополнительно: «Поиск по полу» как команда /pay → откроем VIP-гейт
-        BotCommand("pay", "👩‍❤️‍👨 Поиск по полу"),
-    ]
-    await app.bot.set_my_commands(commands)
+    try:
+        commands = [
+            BotCommand("start", "🔄 Начать"),
+            BotCommand("search", "🔎 Поиск собеседника"),
+            BotCommand("next", "🆕 Закончить диалог и искать нового собеседника"),
+            BotCommand("stop", "⛔ Закончить диалог с собеседником"),
+            BotCommand("vip", "💎 Стать VIP-пользователем"),
+            BotCommand("link", "🔗 Отправить ссылку на ваш Telegram собеседнику"),
+            BotCommand("settings", "⚙️ Настройки пола, возраста и технические настройки"),
+            BotCommand("rules", "📖 Правила общения в чате"),
+            BotCommand("stats", "📊 Статистика"),
+            BotCommand("myid", "🆔 Отобразить ID вашего аккаунта"),
+            BotCommand("pay", "👩‍❤️‍👨 Поиск по полу"),
+        ]
+        await app.bot.set_my_commands(commands)
+    except Exception as e:
+        log.warning(f"set_my_commands failed: {e}")
 
 # ===== Application =====
 def main():
-    if not TOKEN: raise RuntimeError("TELEGRAM_TOKEN is not set")
+    if not TOKEN:
+        raise RuntimeError("TELEGRAM_TOKEN is not set")
     app = Application.builder().token(TOKEN).post_init(post_init).build()
 
     # Команды
@@ -437,7 +458,7 @@ def main():
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("myid", cmd_myid))
     app.add_handler(CommandHandler("settings", cmd_settings))
-    # /pay = «Поиск по полу»: показываем ворота VIP (или подсказываем про нижние кнопки)
+
     async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await is_vip(update.effective_user.id):
             await show_vip_gate(update.effective_chat.id, context)
