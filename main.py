@@ -40,15 +40,15 @@ USERS_SET   = "users"  # множество уникальных пользов�
 CURRENCY_XTR   = "XTR"
 PROVIDER_TOKEN = ""  # Stars → пустая строка
 
-# VIP (12 месяцев как раньше, но планы оставляем на будущее)
+# VIP (12 месяцев)
 VIP_PLANS = {
     "12m": {"months": 12, "amount": 5000, "title": "💎 VIP • 12 months"},
 }
-# PREMIUM планы и отображение цен (Stars/₽/$ — ₽/$ только в тексте)
+# PREMIUM (тексты включают ₽/$ чисто для отображения)
 PREMIUM_PLANS = {
-    "7d":  {"days": 7,   "amount": 150,  "title": "Премиум • 7 дней",  "price_line": "7 дней за 150 ⭐ / 199₽ / $1.99"},
-    "1m":  {"months": 1, "amount": 250,  "title": "Премиум • 1 месяц", "price_line": "1 месяц за 250 ⭐ / 399₽ / $3.99"},
-    "12m": {"months": 12,"amount": 1000, "title": "Премиум • 1 год",   "price_line": "1 год за 1000 ⭐ / 1999₽ / $19.99"},
+    "7d":  {"days": 7,    "amount": 150,  "title": "Премиум • 7 дней",  "price_line": "7 дней за 150 ⭐ / 199₽ / $1.99"},
+    "1m":  {"months": 1,  "amount": 250,  "title": "Премиум • 1 месяц", "price_line": "1 месяц за 250 ⭐ / 399₽ / $3.99"},
+    "12m": {"months": 12, "amount": 1000, "title": "Премиум • 1 год",   "price_line": "1 год за 1000 ⭐ / 1999₽ / $19.99"},
 }
 
 # ===== Reply-клавиатура (кнопка «квадратики») =====
@@ -101,7 +101,7 @@ def profile_str(p: dict) -> str:
     a = p.get("age_range") or "—"
     return f"Пол: {g}\nВозраст: {a}"
 
-# ===== Users counter & menu text =====
+# ===== Users counter =====
 async def add_user(uid: int):
     try:
         await r.sadd(USERS_SET, uid)
@@ -148,7 +148,7 @@ async def has_gender_rights(uid: int) -> bool:
     return (await is_premium(uid)) or (await is_vip(uid))
 
 def _add_months_or_days(base_ts: int, months: int = 0, days: int = 0) -> int:
-    # months -> 30 дней условно, для Stars достаточно
+    # months -> 30 дней условно
     return base_ts + int(days*24*3600 + months*30*24*3600)
 
 async def extend_vip(uid: int, months: int) -> int:
@@ -367,7 +367,6 @@ async def relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== VIP / PREMIUM UI и оплата =====
 def vip_menu_inline() -> InlineKeyboardMarkup:
-    # одна кнопка VIP (12 месяцев)
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"💎 VIP за {VIP_PLANS['12m']['amount']}⭐ / 6999₽ / $69", callback_data="vip_buy:12m")]
     ])
@@ -383,13 +382,11 @@ def premium_menu_inline() -> InlineKeyboardMarkup:
 
 def fmt_until(ts: int) -> str:
     if not ts: return "—"
-    # dd.mm.yyyy
     import datetime as dt
     d = dt.datetime.fromtimestamp(ts)
     return d.strftime("%d.%m.%Y")
 
-async def cmd_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
+async def send_vip_page(chat_id: int, uid: int, context: ContextTypes.DEFAULT_TYPE):
     until = await get_vip_until(uid)
     active = until > int(time.time())
     left = max(0, until - int(time.time()))
@@ -407,9 +404,22 @@ async def cmd_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Переходите к оплате по кнопке ниже:"
     )
     if DIAMOND_IMG_URL:
-        await update.message.reply_photo(DIAMOND_IMG_URL, caption=caption, reply_markup=vip_menu_inline())
+        await context.bot.send_photo(chat_id, DIAMOND_IMG_URL, caption=caption, reply_markup=vip_menu_inline())
     else:
-        await update.message.reply_text(caption, reply_markup=vip_menu_inline())
+        await context.bot.send_message(chat_id, caption, reply_markup=vip_menu_inline())
+
+async def cmd_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_vip_page(update.effective_chat.id, update.effective_user.id, context)
+
+async def cb_open_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    # Убираем клавиатуру под сообщением, чтобы не путало
+    try:
+        await q.edit_message_reply_markup(None)
+    except Exception:
+        pass
+    await send_vip_page(q.message.chat_id, q.from_user.id, context)
 
 async def cb_vip_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query;  await q.answer()
@@ -524,7 +534,7 @@ async def cmd_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Отправителю — подтверждение
     await update.message.reply_text("Ссылка на ваш аккаунт отправлена собеседнику.")
 
-# ===== Доп. команды из меню =====
+# ===== Доп. команды =====
 async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Правила поведения в чате:\nanonchat.io/rules")
 
@@ -566,6 +576,25 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_paysupport(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Помощь по оплате: если возникла проблема с покупкой Премиума/VIP — напишите нам @Support (или ответьте на это сообщение).")
+
+# ===== Reply-кнопки обработчики (нужны ДО main) =====
+async def show_premium_gate(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    text = "Поиск по полу доступен только Премиум/💎VIP пользователям.\n\nОформить — /pay\nПодробности VIP — /vip"
+    if DIAMOND_IMG_URL: await context.bot.send_photo(chat_id, DIAMOND_IMG_URL, caption=text)
+    else: await context.bot.send_message(chat_id, text)
+
+async def on_btn_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await do_search(update.effective_chat.id, update.effective_user.id, context)
+
+async def on_btn_f(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await has_gender_rights(update.effective_user.id):
+        await show_premium_gate(update.effective_chat.id, context);  return
+    await do_search(update.effective_chat.id, update.effective_user.id, context)
+
+async def on_btn_m(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await has_gender_rights(update.effective_user.id):
+        await show_premium_gate(update.effective_chat.id, context);  return
+    await do_search(update.effective_chat.id, update.effective_user.id, context)
 
 # ===== post_init / меню команд =====
 async def post_init(app: Application):
@@ -623,11 +652,11 @@ def main():
     app.add_handler(CallbackQueryHandler(on_gender, pattern=r"^gender:(M|F)$"))
     app.add_handler(CallbackQueryHandler(on_age, pattern=r"^age:(12-20|21-30|31-40)$"))
     app.add_handler(CallbackQueryHandler(on_settings, pattern=r"^settings:(gender|age)$"))
+    app.add_handler(CallbackQueryHandler(cb_open_vip, pattern=r"^open_vip$"))
 
     # Покупки
     app.add_handler(CallbackQueryHandler(cb_vip_buy, pattern=r"^vip_buy:(12m)$"))
     app.add_handler(CallbackQueryHandler(cb_premium_buy, pattern=r"^premium_buy:(7d|1m|12m)$"))
-    app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.message.reply_text("Открываю VIP…");, pattern=r"^open_vip$"))  # fallback
     app.add_handler(PreCheckoutQueryHandler(precheckout_handler))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
 
@@ -636,8 +665,8 @@ def main():
 
     # Кнопки Reply (текстовые)
     app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_ANY)}$"), on_btn_any))
-    app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_F)}$"),   lambda u, c: (has_gender_rights(u.effective_user.id)).__await__() and on_btn_f(u, c)))
-    app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_M)}$"),   lambda u, c: (has_gender_rights(u.effective_user.id)).__await__() and on_btn_m(u, c)))
+    app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_F)}$"),   on_btn_f))
+    app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_M)}$"),   on_btn_m))
 
     # Релеинг всего остального
     ignore = (
@@ -650,26 +679,6 @@ def main():
 
     log.info("Bot starting (run_polling)…")
     app.run_polling()
-
-# Кнопки Reply обработчики (ниже чтобы замыкания не мешали)
-async def on_btn_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await do_search(update.effective_chat.id, update.effective_user.id, context)
-
-async def on_btn_f(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await has_gender_rights(update.effective_user.id):
-        await show_premium_gate(update.effective_chat.id, context);  return
-    await do_search(update.effective_chat.id, update.effective_user.id, context)
-
-async def on_btn_m(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await has_gender_rights(update.effective_user.id):
-        await show_premium_gate(update.effective_chat.id, context);  return
-    await do_search(update.effective_chat.id, update.effective_user.id, context)
-
-# Плашка-гейт для поиска по полу
-async def show_premium_gate(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    text = "Поиск по полу доступен только Премиум/💎VIP пользователям.\n\nОформить — /pay\nПодробности VIP — /vip"
-    if DIAMOND_IMG_URL: await context.bot.send_photo(chat_id, DIAMOND_IMG_URL, caption=text)
-    else: await context.bot.send_message(chat_id, text)
 
 if __name__ == "__main__":
     main()
