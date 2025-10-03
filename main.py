@@ -31,25 +31,32 @@ PROFILE_KEY = "profile:{uid}"
 PAIR_KEY    = "pair:{uid}"
 QUEUE_KEY   = "q:global"
 VIP_KEY     = "vip_until:{uid}"
+PREMIUM_KEY = "premium_until:{uid}"
 RATES_KEY   = "rates:{uid}"
 REPORTS_KEY = "reports:{uid}"
+USERS_SET   = "users"  # множество уникальных пользователей
 
 # ===== Payments (Telegram Stars) =====
 CURRENCY_XTR   = "XTR"
 PROVIDER_TOKEN = ""  # Stars → пустая строка
+
+# VIP (12 месяцев как раньше, но планы оставляем на будущее)
 VIP_PLANS = {
-    "3m":  {"months": 3,  "amount": 1299, "title": "VIP • 3 months"},
-    "6m":  {"months": 6,  "amount": 2399, "title": "VIP • 6 months"},
-    "12m": {"months": 12, "amount": 4499, "title": "VIP • 12 months"},
+    "12m": {"months": 12, "amount": 5000, "title": "💎 VIP • 12 months"},
+}
+# PREMIUM планы и отображение цен (Stars/₽/$ — ₽/$ только в тексте)
+PREMIUM_PLANS = {
+    "7d":  {"days": 7,   "amount": 150,  "title": "Премиум • 7 дней",  "price_line": "7 дней за 150 ⭐ / 199₽ / $1.99"},
+    "1m":  {"months": 1, "amount": 250,  "title": "Премиум • 1 месяц", "price_line": "1 месяц за 250 ⭐ / 399₽ / $3.99"},
+    "12m": {"months": 12,"amount": 1000, "title": "Премиум • 1 год",   "price_line": "1 год за 1000 ⭐ / 1999₽ / $19.99"},
 }
 
-# ===== Reply-клавиатура =====
+# ===== Reply-клавиатура (кнопка «квадратики») =====
 BTN_ANY = "🚀 Поиск любого собеседника"
 BTN_F   = "🙋‍♀️ Поиск Ж"
 BTN_M   = "🙋‍♂️ Поиск М"
 
 def reply_menu_kb() -> ReplyKeyboardMarkup:
-    # Убрали is_persistent — бывает не поддерживается
     return ReplyKeyboardMarkup(
         keyboard=[[BTN_ANY],[BTN_F, BTN_M]],
         resize_keyboard=True,
@@ -82,33 +89,80 @@ def age_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton("31–40", callback_data="age:31-40"),
     ]])
 
+def settings_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👨‍🦱 Пол 👩‍🦱", callback_data="settings:gender")],
+        [InlineKeyboardButton("📅 Возраст", callback_data="settings:age")],
+    ])
+
 def profile_str(p: dict) -> str:
     g_map = {"M": "Мужской", "F": "Женский"}
     g = g_map.get(p.get("gender"), "—")
     a = p.get("age_range") or "—"
     return f"Пол: {g}\nВозраст: {a}"
 
-def menu_text_no_vip(prefix: str = "") -> str:
-    return (
-        (prefix + "\n" if prefix else "")
-        + "Теперь можно приступить к поиску собеседника!\n\n"
-        "/search — поиск собеседника\n"
-        "/next — следующий собеседник\n"
-        "/stop — остановить диалог"
-    )
+# ===== Users counter & menu text =====
+async def add_user(uid: int):
+    try:
+        await r.sadd(USERS_SET, uid)
+    except Exception as e:
+        log.warning(f"SADD users failed: {e}")
 
-# ===== Helpers/VIP =====
+async def users_count() -> int:
+    try:
+        return await r.scard(USERS_SET)
+    except Exception:
+        return 0
+
+def menu_text_base(users_total: int, prefix: str = "") -> str:
+    top = f"Сейчас в чате {users_total} пользователей 👥"
+    body = (
+        "/search — поиск собеседника\n"
+        "/next — закончить текущий диалог и сразу же искать нового собеседника\n"
+        "/stop — закончить разговор с собеседником"
+    )
+    return (prefix + "\n" if prefix else "") + top + "\n\n" + body
+
+# ===== Helpers: VIP / PREMIUM =====
 def vip_k(uid: int) -> str: return VIP_KEY.format(uid=uid)
-async def get_vip_until(uid: int) -> int:
-    val = await r.get(vip_k(uid))
+def premium_k(uid: int) -> str: return PREMIUM_KEY.format(uid=uid)
+
+async def _get_until(key: str) -> int:
+    val = await r.get(key)
     return int(val) if val else 0
+
+async def get_vip_until(uid: int) -> int:
+    return await _get_until(vip_k(uid))
+
+async def get_premium_until(uid: int) -> int:
+    return await _get_until(premium_k(uid))
+
 async def is_vip(uid: int) -> bool:
     return (await get_vip_until(uid)) > int(time.time())
+
+async def is_premium(uid: int) -> bool:
+    return (await get_premium_until(uid)) > int(time.time())
+
+async def has_gender_rights(uid: int) -> bool:
+    # Право искать по полу — у Премиума ИЛИ у VIP
+    return (await is_premium(uid)) or (await is_vip(uid))
+
+def _add_months_or_days(base_ts: int, months: int = 0, days: int = 0) -> int:
+    # months -> 30 дней условно, для Stars достаточно
+    return base_ts + int(days*24*3600 + months*30*24*3600)
+
 async def extend_vip(uid: int, months: int) -> int:
     now_i = int(time.time())
     base = max(now_i, await get_vip_until(uid))
-    new_until = base + int(30*24*3600*months)
+    new_until = _add_months_or_days(base, months=months)
     await r.set(vip_k(uid), new_until)
+    return new_until
+
+async def extend_premium(uid: int, months: int = 0, days: int = 0) -> int:
+    now_i = int(time.time())
+    base = max(now_i, await get_premium_until(uid))
+    new_until = _add_months_or_days(base, months=months, days=days)
+    await r.set(premium_k(uid), new_until)
     return new_until
 
 # ===== Profiles/Pairs/Queue =====
@@ -154,14 +208,18 @@ async def remove_from_queue(uid: int): await r.lrem(QUEUE_KEY, 0, uid)
 # ===== START / анкета =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    await add_user(uid)
     p = await get_profile(uid)
     if not p["gender"]:
         await update.message.reply_text("Привет! Выбери свой пол:", reply_markup=gender_kb());  return
     if not p["age_range"]:
         await update.message.reply_text("Укажи возраст:", reply_markup=age_kb());  return
-    await update.message.reply_text("Профиль уже заполнен ✅\n" + profile_str(p))
-    await update.message.reply_text(menu_text_no_vip("Отлично!"))
 
+    total = await users_count()
+    await update.message.reply_text("Профиль уже заполнен ✅\n" + profile_str(p))
+    await update.message.reply_text(menu_text_base(total, "Отлично!"), reply_markup=reply_menu_kb())
+
+# callbacks анкеты
 async def on_gender(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query;  await q.answer()
     uid = q.from_user.id;  _, gender = q.data.split(":", 1)
@@ -172,8 +230,9 @@ async def on_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query;  await q.answer()
     uid = q.from_user.id;  _, age_range = q.data.split(":", 1)
     p = await get_profile(uid);  p["age_range"] = age_range;  await save_profile(uid, p)
+    total = await users_count()
     await q.edit_message_text("Возраст сохранён ✅\n\nТвой профиль:\n" + profile_str(p))
-    await q.message.reply_text(menu_text_no_vip("Отлично!"))
+    await q.message.reply_text(menu_text_base(total, "Отлично!"), reply_markup=reply_menu_kb())
 
 # ===== Matching =====
 async def try_match(uid: int) -> Optional[int]:
@@ -187,7 +246,8 @@ async def try_match(uid: int) -> Optional[int]:
             continue
         return other
 
-async def try_match_vip(uid: int) -> Optional[int]:
+async def try_match_priority(uid: int) -> Optional[int]:
+    # Для прем/вип — приоритетный просмотр очереди
     members = await r.lrange(QUEUE_KEY, 0, -1)
     for raw in members:
         other = int(raw)
@@ -210,8 +270,10 @@ async def do_search(chat_id: int, uid: int, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id, "Ты уже в диалоге.\n/next — новый собеседник\n/stop — закончить диалог");  return
 
     peer = None
-    if await is_vip(uid): peer = await try_match_vip(uid)
-    if not peer: peer = await try_match(uid)
+    if await has_gender_rights(uid):
+        peer = await try_match_priority(uid)
+    if not peer:
+        peer = await try_match(uid)
 
     if peer:
         await set_pair(uid, peer);  await announce_pair(context, uid, peer)
@@ -220,6 +282,7 @@ async def do_search(chat_id: int, uid: int, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id, "Ищу собеседника… ⏳\n/stop — отменить поиск", reply_markup=hide_reply_kb())
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await add_user(update.effective_user.id)
     await do_search(update.effective_chat.id, update.effective_user.id, context)
 
 # ===== Оценка и жалобы =====
@@ -296,18 +359,34 @@ async def relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg: return
     uid = update.effective_user.id
+    await add_user(uid)
     peer = await get_peer(uid)
     if not peer: return
     try: await msg.copy(chat_id=peer)
     except Exception as e: log.error(f"relay error: {e}")
 
-# ===== VIP UI / оплата =====
+# ===== VIP / PREMIUM UI и оплата =====
 def vip_menu_inline() -> InlineKeyboardMarkup:
+    # одна кнопка VIP (12 месяцев)
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"💎 VIP на 3 мес — {VIP_PLANS['3m']['amount']}⭐",  callback_data="vip_buy:3m")],
-        [InlineKeyboardButton(f"💎 VIP на 6 мес — {VIP_PLANS['6m']['amount']}⭐",  callback_data="vip_buy:6m")],
-        [InlineKeyboardButton(f"💎 VIP на 12 мес — {VIP_PLANS['12m']['amount']}⭐", callback_data="vip_buy:12m")],
+        [InlineKeyboardButton(f"💎 VIP за {VIP_PLANS['12m']['amount']}⭐ / 6999₽ / $69", callback_data="vip_buy:12m")]
     ])
+
+def premium_menu_inline() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(PREMIUM_PLANS["7d"]["price_line"],  callback_data="premium_buy:7d")],
+        [InlineKeyboardButton(PREMIUM_PLANS["1m"]["price_line"],  callback_data="premium_buy:1m")],
+        [InlineKeyboardButton(PREMIUM_PLANS["12m"]["price_line"], callback_data="premium_buy:12m")],
+        [InlineKeyboardButton("💎 Стать VIP", callback_data="open_vip")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+def fmt_until(ts: int) -> str:
+    if not ts: return "—"
+    # dd.mm.yyyy
+    import datetime as dt
+    d = dt.datetime.fromtimestamp(ts)
+    return d.strftime("%d.%m.%Y")
 
 async def cmd_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -315,19 +394,17 @@ async def cmd_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active = until > int(time.time())
     left = max(0, until - int(time.time()))
     days = left // 86400; hours = (left % 86400) // 3600
-    status = "не активен ❌" if not active else "активен ✅"
+    status = "не активен ❌" if not active else f"активен до {fmt_until(until)} ✅"
 
     caption = (
         f"VIP-статус: {status}\n"
         f"Осталось: {days}d {hours}h\n\n"
-        "Если вы хотите выделиться и стать самым ярким собеседником в боте, предлагаем стать VIP-пользователем на 3–12 месяцев.\n\n"
-        "⏳ VIP-пользователи получают премиум-аккаунт в боте на 3, 6 или 12 месяцев\n"
-        "🧭 У VIP-пользователей есть приоритет в поиске: вы быстрее остальных будете находить собеседников по выбранному полу\n\n"
-        "Стоимость VIP-статуса:\n"
-        f"• 3 месяца — {VIP_PLANS['3m']['amount']} Telegram Stars\n"
-        f"• 6 месяцев — {VIP_PLANS['6m']['amount']} Telegram Stars\n"
-        f"• 12 месяцев — {VIP_PLANS['12m']['amount']} Telegram Stars\n"
-        "Перейдите к оплате кнопкой ниже:"
+        "Если вы хотите выделиться и стать самым ярким собеседником в боте, предлагаем стать VIP-пользователем на 12 месяцев\n\n"
+        "⏳ VIP-пользователи получают премиум-аккаунт в боте на 12 месяцев\n"
+        "🧭 У VIP-пользователей есть приоритет в поиске: вы быстрее остальных будете находить собеседников по выбранным интересам и полу\n"
+        "💎 Каждый собеседник увидит ваш VIP-статус и проявит больший интерес\n\n"
+        f"Стоимость VIP-статуса на 12 месяцев — {VIP_PLANS['12m']['amount']} Telegram Stars / 6999₽ / $69\n"
+        "Переходите к оплате по кнопке ниже:"
     )
     if DIAMOND_IMG_URL:
         await update.message.reply_photo(DIAMOND_IMG_URL, caption=caption, reply_markup=vip_menu_inline())
@@ -353,22 +430,80 @@ async def cb_vip_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         need_email=False, need_shipping_address=False, is_flexible=False,
     )
 
+# ===== Премиум =====
+def premium_text_no(active: bool) -> str:
+    return (
+        "Премиум пользователи могут искать собеседников по полу. Приобретая премиум, вы получаете следующие преимущества:\n\n"
+        "📌 Поиск по полу\n"
+        "👩 Премиум пользователи могут искать только девушек или только парней\n\n"
+        "📌 Безлимитное общение\n"
+        "♾️ Премиум пользователи не могут получить ограничение на количество чатов в день\n\n"
+        "📌 Отсутствие рекламы\n"
+        "📲 Мы не показываем рекламу премиум пользователям\n\n"
+        "📌 Поддержка чата\n"
+        "🎁 Чем больше вы нас поддерживаете, тем больше новых функций мы внедрим, будем лучше модерировать чат и покупать больше рекламы для увеличения количества собеседников\n\n"
+        "💎 Если вы хотите стать не просто премиум-пользователем, а уникальным VIP-собеседником, переходите за подробностями по команде /vip\n\n"
+        "Чтобы " + ("продлить" if active else "купить") + " премиум, выберите продолжительность и удобный способ оплаты ниже:"
+    )
+
+async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    prem_until = await get_premium_until(uid)
+    active = prem_until > int(time.time())
+    if not active:
+        text = premium_text_no(False)
+    else:
+        text = (
+            f"❗ У вас есть активный премиум до {fmt_until(prem_until)}\n\n" +
+            premium_text_no(True)
+        )
+    await update.message.reply_text(text, reply_markup=premium_menu_inline())
+
+async def cb_premium_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query;  await q.answer()
+    try: _, plan_key = q.data.split(":", 1)
+    except Exception: await q.edit_message_text("План не найден, попробуйте ещё раз."); return
+    plan = PREMIUM_PLANS.get(plan_key)
+    if not plan: await q.edit_message_text("План не найден, попробуйте ещё раз."); return
+
+    title = plan["title"];  description = "Премиум доступ для Анонимного Чата (поиск по полу, безлимит, нет рекламы)."
+    payload = f"premium_{plan_key}"
+    prices = [LabeledPrice(label=title, amount=plan["amount"])]
+
+    await context.bot.send_invoice(
+        chat_id=update.effective_chat.id,
+        title=title, description=description, payload=payload,
+        provider_token=PROVIDER_TOKEN, currency=CURRENCY_XTR, prices=prices,
+        start_parameter="premium", need_name=False, need_phone_number=False,
+        need_email=False, need_shipping_address=False, is_flexible=False,
+    )
+
+# ===== Общий pre-checkout / успешная оплата =====
 async def precheckout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.pre_checkout_query.answer(ok=True)
 
 async def successful_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sp = update.message.successful_payment
-    plan_key = sp.invoice_payload.split("_",1)[1] if sp and sp.invoice_payload.startswith("vip_") else "3m"
-    months = VIP_PLANS.get(plan_key, VIP_PLANS["3m"])["months"]
-    await extend_vip(update.effective_user.id, months)
-    text = f"Спасибо за приобретение VIP-статуса! Теперь вам доступен поиск по полу на {months} месяц(ев)."
+    payload = sp.invoice_payload if sp else ""
+    uid = update.effective_user.id
+
+    if payload.startswith("vip_"):
+        plan_key = payload.split("_",1)[1]
+        months = VIP_PLANS.get(plan_key, VIP_PLANS["12m"])["months"]
+        await extend_vip(uid, months)
+        text = f"Спасибо за приобретение VIP-статуса! Активен до {fmt_until(await get_vip_until(uid))}."
+    elif payload.startswith("premium_"):
+        plan_key = payload.split("_",1)[1]
+        plan = PREMIUM_PLANS.get(plan_key, PREMIUM_PLANS["1m"])
+        months = plan.get("months", 0)
+        days = plan.get("days", 0)
+        await extend_premium(uid, months=months, days=days)
+        text = f"Спасибо! Премиум активен до {fmt_until(await get_premium_until(uid))}. Теперь доступен поиск по полу."
+    else:
+        text = "Оплата получена."
+
     if HALO_IMG_URL: await update.message.reply_photo(HALO_IMG_URL, caption=text, reply_markup=reply_menu_kb())
     else: await update.message.reply_text(text, reply_markup=reply_menu_kb())
-
-async def show_vip_gate(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    text = "Поиск по полу доступен только VIP-пользователям 💎.\n\nДля приобретения VIP-статуса напишите /vip"
-    if DIAMOND_IMG_URL: await context.bot.send_photo(chat_id, DIAMOND_IMG_URL, caption=text)
-    else: await context.bot.send_message(chat_id, text)
 
 # ===== /link — отправить ссылку на себя собеседнику =====
 async def cmd_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -380,37 +515,57 @@ async def cmd_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.username:
         url = f"https://t.me/{user.username}"
-        text = f"👋 Собеседник отправил свою ссылку: {url}"
     else:
         url = f"tg://user?id={uid}"
-        text = f"👋 Собеседник отправил профиль (без имени пользователя): {url}"
-    await context.bot.send_message(peer, text)
-    await update.message.reply_text("Ссылку отправил собеседнику ✅")
 
-# ===== Кнопки Reply =====
-async def on_btn_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await do_search(update.effective_chat.id, update.effective_user.id, context)
-async def on_btn_f(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_vip(update.effective_user.id):
-        await show_vip_gate(update.effective_chat.id, context);  return
-    await do_search(update.effective_chat.id, update.effective_user.id, context)
-async def on_btn_m(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_vip(update.effective_user.id):
-        await show_vip_gate(update.effective_chat.id, context);  return
-    await do_search(update.effective_chat.id, update.effective_user.id, context)
+    # Собеседнику — кликабельное слово «Ссылка»
+    peer_text = f"👋 Собеседник отправил свой профиль: [Ссылка]({url})"
+    await context.bot.send_message(peer, peer_text, parse_mode="Markdown")
+    # Отправителю — подтверждение
+    await update.message.reply_text("Ссылка на ваш аккаунт отправлена собеседнику.")
 
 # ===== Доп. команды из меню =====
 async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📖 Правила: уважайте собеседника, без спама, угроз и нарушений закона. За нарушения — блокировка.")
+    await update.message.reply_text("Правила поведения в чате:\nanonchat.io/rules")
+
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚙️ Настройки: пол/возраст меняются через /start (пройти мини-анкеты заново).")
+    await update.message.reply_text("Выберите настройки, которые вы бы хотели изменить:", reply_markup=settings_menu_kb())
+
+async def on_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    _, what = q.data.split(":", 1)
+    if what == "gender":
+        await q.edit_message_text("Выберите пол:", reply_markup=gender_kb())
+    elif what == "age":
+        await q.edit_message_text("Выберите возраст:", reply_markup=age_kb())
+
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     rates = await r.llen(RATES_KEY.format(uid=uid))
     reports = await r.llen(REPORTS_KEY.format(uid=uid))
-    await update.message.reply_text(f"📊 Статистика: ваши оценки — {rates}, жалобы — {reports}.")
+    total = await users_count()
+    await update.message.reply_text(f"📊 Статистика: ваши оценки — {rates}, жалобы — {reports}.\n👥 Всего пользователей: {total}")
+
 async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🆔 ID вашего аккаунта: <code>{update.effective_user.id}</code>", parse_mode="HTML")
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "Это бот для анонимного общения в Телеграме\n\n"
+        "Бот умеет пересылать сообщения, фото, видео, гифки, стикеры, аудиосообщения и видеосообщения.\n\n"
+        "/search — поиск собеседника\n"
+        "/next — закончить текущий диалог и сразу же искать нового собеседника\n"
+        "/stop — закончить разговор с собеседником\n"
+        "/pay — поиск по полу, оформление и управление премиумом\n"
+        "/vip — стать VIP-пользователем\n"
+        "/link — отправить собеседнику ссылку на вас в Телеграме\n"
+        "/settings — изменить свой пол и другие настройки\n"
+        "/rules — ознакомиться с правилами"
+    )
+    await update.message.reply_text(text)
+
+async def cmd_paysupport(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Помощь по оплате: если возникла проблема с покупкой Премиума/VIP — напишите нам @Support (или ответьте на это сообщение).")
 
 # ===== post_init / меню команд =====
 async def post_init(app: Application):
@@ -429,13 +584,15 @@ async def post_init(app: Application):
             BotCommand("search", "🔎 Поиск собеседника"),
             BotCommand("next", "🆕 Закончить диалог и искать нового собеседника"),
             BotCommand("stop", "⛔ Закончить диалог с собеседником"),
+            BotCommand("help", "🆘 Помощь по боту"),
+            BotCommand("pay", "👩‍❤️‍👨 Поиск по полу / Премиум"),
+            BotCommand("paysupport", "💰 Помощь по оплате"),
             BotCommand("vip", "💎 Стать VIP-пользователем"),
             BotCommand("link", "🔗 Отправить ссылку на ваш Telegram собеседнику"),
-            BotCommand("settings", "⚙️ Настройки пола, возраста и технические настройки"),
-            BotCommand("rules", "📖 Правила общения в чате"),
-            BotCommand("stats", "📊 Статистика"),
+            BotCommand("settings", "⚙️ Настройки пола, возраста и тех. настройки"),
+            BotCommand("rules", "📋 Правила общения в чате"),
+            BotCommand("stats", "📊 Статистика и число пользователей"),
             BotCommand("myid", "🆔 Отобразить ID вашего аккаунта"),
-            BotCommand("pay", "👩‍❤️‍👨 Поиск по полу"),
         ]
         await app.bot.set_my_commands(commands)
     except Exception as e:
@@ -452,6 +609,9 @@ def main():
     app.add_handler(CommandHandler("search", cmd_search))
     app.add_handler(CommandHandler("next", cmd_next))
     app.add_handler(CommandHandler("stop", cmd_stop))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("pay", cmd_pay))
+    app.add_handler(CommandHandler("paysupport", cmd_paysupport))
     app.add_handler(CommandHandler("vip", cmd_vip))
     app.add_handler(CommandHandler("link", cmd_link))
     app.add_handler(CommandHandler("rules", cmd_rules))
@@ -459,19 +619,15 @@ def main():
     app.add_handler(CommandHandler("myid", cmd_myid))
     app.add_handler(CommandHandler("settings", cmd_settings))
 
-    async def cmd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not await is_vip(update.effective_user.id):
-            await show_vip_gate(update.effective_chat.id, context)
-        else:
-            await update.message.reply_text("У вас активен VIP. Используйте нижние кнопки «Поиск Ж/М».", reply_markup=reply_menu_kb())
-    app.add_handler(CommandHandler("pay", cmd_pay))
-
-    # Анкета (инлайн)
+    # Инлайн коллбэки
     app.add_handler(CallbackQueryHandler(on_gender, pattern=r"^gender:(M|F)$"))
     app.add_handler(CallbackQueryHandler(on_age, pattern=r"^age:(12-20|21-30|31-40)$"))
+    app.add_handler(CallbackQueryHandler(on_settings, pattern=r"^settings:(gender|age)$"))
 
-    # VIP покупки (инлайн + платежи)
-    app.add_handler(CallbackQueryHandler(cb_vip_buy, pattern=r"^vip_buy:(3m|6m|12m)$"))
+    # Покупки
+    app.add_handler(CallbackQueryHandler(cb_vip_buy, pattern=r"^vip_buy:(12m)$"))
+    app.add_handler(CallbackQueryHandler(cb_premium_buy, pattern=r"^premium_buy:(7d|1m|12m)$"))
+    app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.message.reply_text("Открываю VIP…");, pattern=r"^open_vip$"))  # fallback
     app.add_handler(PreCheckoutQueryHandler(precheckout_handler))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
 
@@ -480,8 +636,8 @@ def main():
 
     # Кнопки Reply (текстовые)
     app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_ANY)}$"), on_btn_any))
-    app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_F)}$"),   on_btn_f))
-    app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_M)}$"),   on_btn_m))
+    app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_F)}$"),   lambda u, c: (has_gender_rights(u.effective_user.id)).__await__() and on_btn_f(u, c)))
+    app.add_handler(MessageHandler(filters.Regex(f"^{re.escape(BTN_M)}$"),   lambda u, c: (has_gender_rights(u.effective_user.id)).__await__() and on_btn_m(u, c)))
 
     # Релеинг всего остального
     ignore = (
@@ -494,6 +650,26 @@ def main():
 
     log.info("Bot starting (run_polling)…")
     app.run_polling()
+
+# Кнопки Reply обработчики (ниже чтобы замыкания не мешали)
+async def on_btn_any(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await do_search(update.effective_chat.id, update.effective_user.id, context)
+
+async def on_btn_f(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await has_gender_rights(update.effective_user.id):
+        await show_premium_gate(update.effective_chat.id, context);  return
+    await do_search(update.effective_chat.id, update.effective_user.id, context)
+
+async def on_btn_m(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await has_gender_rights(update.effective_user.id):
+        await show_premium_gate(update.effective_chat.id, context);  return
+    await do_search(update.effective_chat.id, update.effective_user.id, context)
+
+# Плашка-гейт для поиска по полу
+async def show_premium_gate(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    text = "Поиск по полу доступен только Премиум/💎VIP пользователям.\n\nОформить — /pay\nПодробности VIP — /vip"
+    if DIAMOND_IMG_URL: await context.bot.send_photo(chat_id, DIAMOND_IMG_URL, caption=text)
+    else: await context.bot.send_message(chat_id, text)
 
 if __name__ == "__main__":
     main()
